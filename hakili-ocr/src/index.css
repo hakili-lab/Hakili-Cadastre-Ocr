@@ -1,0 +1,311 @@
+/* ============================================================
+   HAKILI OCR — Fondations du design system
+   Deux étages : palette brute (--hk-*) puis tokens sémantiques
+   exposés à Tailwind (@theme). Les composants n'utilisent QUE
+   les tokens sémantiques.
+   ============================================================ */
+
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:opsz,wght@6..72,400;6..72,500&display=swap');
+@import "tailwindcss";
+/* KaTeX styles */
+@import "katex/dist/katex.min.css";
+
+/* ---------- Étage 1 : palette brute (issue du logo) ---------- */
+:root {
+  /* Marine — l'encre de la marque (affiche Hakili Lab) */
+  --hk-navy-900: #0a2342;
+  --hk-navy-700: #17395f;
+  --hk-navy-500: #33455f;
+  --hk-navy-300: #5b6b82;
+  --hk-navy-200: #78879b;
+
+  /* Bleu roi — le bleu du logo, réservé à l'action */
+  --hk-blue-700: #003b7d;
+  --hk-blue-600: #004a9b;
+  --hk-blue-500: #0058b8;
+  --hk-blue-100: #e8f0fb;
+
+  /* Verts — l'arc du logo. Sémantique uniquement (validé / confiance) */
+  --hk-green-600: #2f7d3a;
+  --hk-green-100: #e9f2ea;
+  --hk-lime-500: #84b828; /* accent décoratif rare, jamais du texte */
+
+  /* Ambre & rouge — confiance moyenne / faible */
+  --hk-amber-700: #9a5a00;
+  --hk-amber-100: #fde3b8; /* = surbrillance ==...== déjà en place */
+  --hk-red-600: #b3261e;
+  --hk-red-100: #fbeae8;
+
+  /* Neutres chauds — 80 % de la surface */
+  --hk-paper: #ffffff;
+  --hk-ivory: #f7f7f2;
+  --hk-sand-100: #efefe8;
+  --hk-sand-200: #e7e7e0;
+  --hk-sand-300: #d8d8d0;
+  --hk-sand-500: #8c8c82;
+}
+
+/* ---------- Étage 2 : tokens sémantiques (API Tailwind) ---------- */
+@theme {
+  /* Surfaces */
+  --color-surface: var(--hk-paper);          /* la « feuille » : cartes, panneaux */
+  --color-surface-page: var(--hk-ivory);     /* fond d'application */
+  --color-surface-sunken: var(--hk-sand-100);/* zones creusées, barres d'outils */
+  --color-surface-inverse: var(--hk-navy-900);
+
+  /* Texte */
+  --color-ink: var(--hk-navy-900);           /* 14.7:1 sur ivoire */
+  --color-ink-secondary: var(--hk-navy-500); /* 9.1:1 */
+  --color-ink-muted: var(--hk-navy-300);     /* 5.1:1 */
+  --color-ink-subtle: var(--hk-navy-200);    /* 3.4:1 — grand texte / décor */
+  --color-ink-inverse: var(--hk-ivory);
+
+  /* Traits */
+  --color-line: var(--hk-sand-200);          /* filets décoratifs */
+  --color-line-strong: var(--hk-sand-300);   /* séparations de panneaux */
+  --color-line-control: var(--hk-sand-500);  /* bordure de champ — 3.2:1 */
+
+  /* Action */
+  --color-action: var(--hk-blue-500);
+  --color-action-hover: var(--hk-blue-600);
+  --color-action-active: var(--hk-blue-700);
+  --color-action-soft: var(--hk-blue-100);
+  --color-focus: var(--hk-blue-500);
+
+  /* Accent décoratif */
+  --color-accent: var(--hk-lime-500);
+
+  /* Confiance OCR (données, pas chrome) */
+  --color-conf-high: var(--hk-green-600);
+  --color-conf-high-soft: var(--hk-green-100);
+  --color-conf-mid: var(--hk-amber-700);
+  --color-conf-mid-soft: var(--hk-amber-100);
+  --color-conf-low: var(--hk-red-600);
+  --color-conf-low-soft: var(--hk-red-100);
+
+  /* Typographie */
+  --font-display: "Newsreader", Georgia, "Times New Roman", serif;
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  --text-2xs: 0.6875rem;   /* 11px — étiquettes majuscules */
+  --text-2xs--line-height: 1rem;
+  --text-xs: 0.75rem;      /* 12px — méta, compteurs */
+  --text-xs--line-height: 1.125rem;
+  --text-sm: 0.8125rem;    /* 13px — UI dense, tableaux */
+  --text-sm--line-height: 1.25rem;
+  --text-base: 0.9375rem;  /* 15px — corps d'interface */
+  --text-base--line-height: 1.5rem;
+  --text-md: 1rem;         /* 16px — lecture longue, blocs transcrits */
+  --text-md--line-height: 1.625rem;
+  --text-lg: 1.125rem;     /* 18px — titres de section */
+  --text-lg--line-height: 1.625rem;
+  --text-xl: 1.375rem;     /* 22px */
+  --text-xl--line-height: 1.875rem;
+  --text-2xl: 1.75rem;     /* 28px — titre d'écran */
+  --text-2xl--line-height: 2.125rem;
+  --text-3xl: 2.25rem;     /* 36px — titre d'accueil */
+  --text-3xl--line-height: 2.625rem;
+
+  /* Rayons — sobres, la douceur vient des filets pas des angles */
+  --radius-xs: 3px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+
+  /* Ombres — quasi absentes ; une seule pour ce qui flotte vraiment */
+  --shadow-raise: 0 1px 2px rgb(10 35 66 / 0.06);
+  --shadow-float: 0 8px 28px -6px rgb(10 35 66 / 0.16), 0 2px 6px rgb(10 35 66 / 0.06);
+
+  /* Mouvement */
+  --ease-out-hk: cubic-bezier(0.2, 0, 0, 1);
+  --ease-in-out-hk: cubic-bezier(0.6, 0, 0.2, 1);
+}
+
+/* ---------- Base ---------- */
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  body {
+    background: var(--color-surface-page);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-size: var(--text-base);
+    line-height: var(--text-base--line-height);
+  }
+
+  /* Focus visible unique et non négociable */
+  :focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+    border-radius: var(--radius-xs);
+  }
+
+  ::selection {
+    background: var(--color-action-soft);
+    color: var(--color-ink);
+  }
+}
+
+/* ---------- Signature : la trame de cahier ----------
+   Fond de la zone de dépôt et des surfaces « en attente de
+   document ». Reprend le quadrillage vert des pages du logo.
+   Jamais sous du texte long, jamais sous l'image source.        */
+@utility trame-cahier {
+  background-image:
+    linear-gradient(to right, rgb(132 184 40 / 0.10) 1px, transparent 1px),
+    linear-gradient(to bottom, rgb(132 184 40 / 0.10) 1px, transparent 1px);
+  background-size: 24px 24px;
+  background-position: center center;
+}
+
+/* Fond quadrillé (points) des écrans de dépôt/aperçu/chargement */
+@utility trame-points {
+  background-image: radial-gradient(circle, rgb(140 140 130 / 0.18) 1px, transparent 1px);
+  background-size: 20px 20px;
+}
+
+/* Flottement doux des étiquettes de capacité (écran de dépôt) */
+@keyframes hk-tag-float {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-4px);
+  }
+}
+.animate-tag-float {
+  animation: hk-tag-float 3.2s ease-in-out infinite;
+}
+
+/* Révélation à l'arrivée sur l'écran de résultat (image + blocs de contenu) */
+@keyframes hk-reveal-box {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes hk-reveal-block {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.animate-hk-reveal-box {
+  animation: hk-reveal-box 0.4s var(--ease-out-hk) both;
+}
+.animate-hk-reveal-block {
+  animation: hk-reveal-block 0.4s var(--ease-out-hk) both;
+}
+
+/* ---------- Mouvement réduit ---------- */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ---------- Scrollbar personnalisée ---------- */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-ink-muted);
+  border-radius: 3px;
+}
+
+.markdown-content table {
+  border-collapse: collapse;
+  margin: 0.5em auto;
+}
+.markdown-content th,
+.markdown-content td {
+  border: 1px solid var(--color-line-strong);
+  padding: 2px 5px;
+  font-size: 10px;
+}
+.markdown-content th {
+  background-color: var(--color-surface-sunken);
+  font-weight: 600;
+}
+
+/* Transition douce à l'entrée/sortie du mode édition (blocs et cellules) */
+@keyframes hakili-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.animate-edit-fade {
+  animation: hakili-fade-in 2000ms ease-in-out;
+}
+
+.markdown-content mark.ocr-uncertain {
+  background-color: var(--color-conf-mid-soft);
+  color: inherit;
+  border-radius: 3px;
+  padding: 0 2px;
+  text-decoration: underline wavy var(--color-conf-mid);
+  text-underline-offset: 3px;
+}
+
+@keyframes progress {
+  0% {
+    width: 0%;
+    transform: translateX(-100%);
+  }
+  50% {
+    width: 70%;
+    transform: translateX(0%);
+  }
+  100% {
+    width: 100%;
+    transform: translateX(0%);
+  }
+}
+
+/* ---------- Écran de chargement : anneau + barre indéterminés ---------- */
+@keyframes hk-loading-ring-spin {
+  from {
+    transform: rotate(-90deg);
+  }
+  to {
+    transform: rotate(270deg);
+  }
+}
+.animate-loading-ring-spin {
+  animation: hk-loading-ring-spin 1.6s linear infinite;
+  transform-origin: 50% 50%;
+}
+
+@keyframes hk-loading-bar-sweep {
+  0% {
+    left: -30%;
+  }
+  50% {
+    left: 100%;
+  }
+  100% {
+    left: -30%;
+  }
+}
+.animate-loading-bar-sweep {
+  left: -30%;
+  animation: hk-loading-bar-sweep 1.8s var(--ease-out-hk) infinite;
+}

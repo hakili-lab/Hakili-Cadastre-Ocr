@@ -1,0 +1,28 @@
+services:
+  backend:
+    build:
+      context: ./ocr-math-api
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - backend_data:/app/data
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./hakili-ocr
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL}
+        VITE_APP_API_KEY: ${APP_API_KEY}
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  # Corrections SQLite + images croppées (app/data/ côté backend) — doit
+  # persister entre les redéploiements, jamais copié dans l'image.
+  backend_data:

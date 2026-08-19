@@ -1,0 +1,43 @@
+# Environnements virtuels
+.venv/
+venv/
+env/
+ENV/
+
+# Variables d'environnement (contient ANTHROPIC_API_KEY / APP_API_KEY en clair)
+.env
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+
+# Tests / couverture
+.pytest_cache/
+.coverage
+htmlcov/
+tests/
+
+# Dataset de corrections généré localement (SQLite + images croppées) — doit
+# rester un volume monté, jamais copié dans l'image
+data/
+
+# Images de test locales
+images/
+*.png
+*.jpg
+*.jpeg
+
+# VCS / éditeurs / OS
+.git/
+.gitignore
+.vscode/
+.idea/
+.DS_Store
+
+# Docs (pas nécessaires dans l'image)
+README.md

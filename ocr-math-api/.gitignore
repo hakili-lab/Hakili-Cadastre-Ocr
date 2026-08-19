@@ -1,0 +1,37 @@
+# Environnements virtuels
+venv/
+env/
+.venv/
+ENV/
+
+# Variables d'environnement 
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Tests / couverture
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Éditeurs / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Fichiers de test locaux
+Tests/
+*.png
+*.jpg
+*.jpeg
+!README_assets/*.png
+
+# Dataset de corrections généré localement (SQLite + images croppées)
+data/

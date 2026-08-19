@@ -1,0 +1,6 @@
+# Dépendances utiles en développement uniquement (jamais importées par app/) :
+# -r requirements.txt pour avoir aussi les dépendances de production.
+-r requirements.txt
+
+# Utilisé par tests/test_transcribe.py (script manuel de test de l'API)
+requests>=2.32.0

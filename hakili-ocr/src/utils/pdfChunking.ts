@@ -27,11 +27,25 @@ export const PDF_CHUNK_PAGE_COUNT_THRESHOLD = 30;
  */
 export const PDF_CHUNK_SIZE_PAGES = 20;
 
-/** Nombre de pages d'un PDF, sans rien rasteriser — ne lit que la structure du document. */
-export async function getPdfPageCount(file: File): Promise<number> {
+/**
+ * Un PDF chargé une seule fois (`PDFDocument.load`, qui analyse toute la structure du
+ * document — table des objets, pages, ressources) et son nombre de pages, prêt à être réutilisé
+ * par `splitLoadedPdfIntoChunks` sans reparser le fichier. Charger un PDF de plusieurs centaines
+ * de pages est un vrai coût CPU (thread principal, pdf-lib n'a pas de mode Worker) : le séparer
+ * en deux étapes (charger, puis découper) permet à l'appelant de connaître le nombre de pages
+ * — nécessaire pour décider s'il découpe ou non, voir `PDF_CHUNK_PAGE_COUNT_THRESHOLD` — sans
+ * jamais payer ce coût deux fois pour le même fichier.
+ */
+export interface LoadedPdf {
+  pageCount: number;
+  doc: PDFDocument;
+}
+
+/** Charge `file` et rapporte son nombre de pages — voir `LoadedPdf` pour pourquoi ce chargement est réutilisable. */
+export async function loadPdf(file: File): Promise<LoadedPdf> {
   const bytes = await file.arrayBuffer();
-  const pdfDoc = await PDFDocument.load(bytes);
-  return pdfDoc.getPageCount();
+  const doc = await PDFDocument.load(bytes);
+  return { pageCount: doc.getPageCount(), doc };
 }
 
 export interface PdfChunk {
@@ -44,18 +58,17 @@ export interface PdfChunk {
 }
 
 /**
- * Découpe `file` en une suite de sous-PDF de `pagesPerChunk` pages maximum chacun — copie
- * structurelle des pages (`copyPages`/`addPage`), sans rendu de pixel. Les morceaux sont
- * produits dans l'ordre du document ; à charge de l'appelant de les envoyer dans cet ordre et
- * un par un (le backend numérote les pages lui-même à réception, dans l'ordre d'arrivée — voir
- * la note sur l'envoi strictement séquentiel dans `useTranscribe.ts` : aucun numéro d'ordre
- * n'est transmis, `startPageIndex` ici ne sert qu'à un éventuel affichage de progression
- * d'envoi côté client, pas à la numérotation finale des pages).
+ * Découpe un PDF déjà chargé (`loadPdf`) en une suite de sous-PDF de `pagesPerChunk` pages
+ * maximum chacun — copie structurelle des pages (`copyPages`/`addPage`), sans rendu de pixel, et
+ * sans reparser `file` : `doc` est réutilisé tel quel. Les morceaux sont produits dans l'ordre du
+ * document ; à charge de l'appelant de les envoyer dans cet ordre et un par un (le backend
+ * numérote les pages lui-même à réception, dans l'ordre d'arrivée — voir la note sur l'envoi
+ * strictement séquentiel dans `useTranscribe.ts` : aucun numéro d'ordre n'est transmis,
+ * `startPageIndex` ici ne sert qu'à un éventuel affichage de progression d'envoi côté client, pas
+ * à la numérotation finale des pages).
  */
-export async function splitPdfIntoChunks(file: File, pagesPerChunk: number): Promise<PdfChunk[]> {
-  const bytes = await file.arrayBuffer();
-  const sourceDoc = await PDFDocument.load(bytes);
-  const totalPages = sourceDoc.getPageCount();
+export async function splitLoadedPdfIntoChunks(doc: PDFDocument, pagesPerChunk: number): Promise<PdfChunk[]> {
+  const totalPages = doc.getPageCount();
 
   const chunks: PdfChunk[] = [];
   for (let startPageIndex = 0; startPageIndex < totalPages; startPageIndex += pagesPerChunk) {
@@ -63,7 +76,7 @@ export async function splitPdfIntoChunks(file: File, pagesPerChunk: number): Pro
     const pageIndices = Array.from({ length: pageCount }, (_, i) => startPageIndex + i);
 
     const chunkDoc = await PDFDocument.create();
-    const copiedPages = await chunkDoc.copyPages(sourceDoc, pageIndices);
+    const copiedPages = await chunkDoc.copyPages(doc, pageIndices);
     copiedPages.forEach((page) => chunkDoc.addPage(page));
 
     const chunkBytes = await chunkDoc.save();

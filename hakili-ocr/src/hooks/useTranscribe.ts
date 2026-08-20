@@ -19,7 +19,7 @@ import type {
   PdfChunkAckResponse,
 } from '../types';
 import { fetchApi, TranscribeError } from '../services/apiClient';
-import { getPdfPageCount, splitPdfIntoChunks, PDF_CHUNK_PAGE_COUNT_THRESHOLD, PDF_CHUNK_SIZE_PAGES } from '../utils/pdfChunking';
+import { loadPdf, splitLoadedPdfIntoChunks, PDF_CHUNK_PAGE_COUNT_THRESHOLD, PDF_CHUNK_SIZE_PAGES } from '../utils/pdfChunking';
 
 export { TranscribeError };
 
@@ -202,8 +202,9 @@ export function useTranscription(): UseTranscriptionResult {
    */
   const startPdfChunkedFlow = useCallback(async (file: File) => {
     let pageCount: number;
+    let doc: Awaited<ReturnType<typeof loadPdf>>['doc'];
     try {
-      pageCount = await getPdfPageCount(file);
+      ({ pageCount, doc } = await loadPdf(file));
     } catch {
       // PDF illisible côté client (fichier corrompu ?) — laisse le backend faire sa propre
       // validation via le flux classique plutôt que d'échouer silencieusement ici.
@@ -221,7 +222,9 @@ export function useTranscription(): UseTranscriptionResult {
       const jobStart = await startPdfJobChunked(pageCount);
       setPdfJobId(jobStart.job_id);
 
-      const chunks = await splitPdfIntoChunks(file, PDF_CHUNK_SIZE_PAGES);
+      // Réutilise `doc` (déjà chargé par loadPdf ci-dessus) au lieu de reparser `file` — un
+      // PDF de plusieurs centaines de pages ne doit être parsé qu'une seule fois.
+      const chunks = await splitLoadedPdfIntoChunks(doc, PDF_CHUNK_SIZE_PAGES);
       for (let i = 0; i < chunks.length; i++) {
         const isLastChunk = i === chunks.length - 1;
         await uploadPdfChunk(jobStart.job_id, chunks[i].blob, isLastChunk);

@@ -115,7 +115,7 @@ function UploadZone() {
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
       className={`
-        min-h-[320px] rounded-md flex items-center justify-center p-6 sm:p-8 box-border
+        min-h-80 rounded-md flex items-center justify-center p-6 sm:p-8 box-border
         transition-colors duration-200
         ${hasError
           ? 'border-2 border-conf-low bg-surface trame-cahier'

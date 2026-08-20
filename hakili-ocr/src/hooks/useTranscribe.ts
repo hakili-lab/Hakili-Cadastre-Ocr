@@ -126,7 +126,7 @@ async function startPdfJobChunked(pagesExpected: number): Promise<PdfJobStartRes
 
 /**
  * POST /transcribe/pdf/{jobId}/chunk : envoie un morceau (sous-PDF produit par
- * `splitPdfIntoChunks`) d'un job ouvert par `startPdfJobChunked`. Les morceaux doivent être
+ * `splitLoadedPdfIntoChunks`) d'un job ouvert par `startPdfJobChunked`. Les morceaux doivent être
  * envoyés strictement l'un après l'autre (voir la boucle séquentielle dans `startPdfChunkedFlow`
  * ci-dessous) — le backend numérote lui-même les pages à réception, dans l'ordre d'arrivée.
  */
@@ -192,7 +192,7 @@ export function useTranscription(): UseTranscriptionResult {
   /**
    * Décide entre le flux `/pdf/start` classique (petit PDF, fichier entier en un POST) et le
    * flux chunké (gros PDF, au-dessus de PDF_CHUNK_PAGE_COUNT_THRESHOLD pages) : découpe le
-   * fichier via `splitPdfIntoChunks` et envoie chaque morceau l'un après l'autre — le morceau
+   * fichier via `splitLoadedPdfIntoChunks` et envoie chaque morceau l'un après l'autre — le morceau
    * N+1 n'est envoyé qu'une fois la réponse du morceau N reçue, jamais en parallèle. C'est ce qui
    * permet au traitement Claude du morceau N de continuer côté backend PENDANT que N+1 est
    * envoyé (upload et traitement se chevauchent), sans qu'aucun ordre n'ait besoin d'être
@@ -261,8 +261,16 @@ export function useTranscription(): UseTranscriptionResult {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // `chunkUploadError` doit rester dans cette liste : si POST /pdf/start-chunked lui-même échoue
+  // (avant que pdfJobId ne soit jamais posé), aucune des autres conditions n'est vraie et
+  // l'erreur serait silencieusement perdue en retombant sur la branche image ci-dessous
+  // (isPending: false, isError: false — spinner bloqué indéfiniment sans message).
   const isPdfFlow =
-    pdfJobId !== null || startPdfMutation.isPending || mockPdfResult !== null || isChunkedStarting;
+    pdfJobId !== null ||
+    startPdfMutation.isPending ||
+    mockPdfResult !== null ||
+    isChunkedStarting ||
+    chunkUploadError !== null;
 
   if (isPdfFlow) {
     if (USE_MOCK) {

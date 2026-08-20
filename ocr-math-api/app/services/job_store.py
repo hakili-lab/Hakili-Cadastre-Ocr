@@ -54,9 +54,11 @@ class PDFJob:
     # Rafraîchi à chaque morceau reçu et à chaque tâche de traitement terminée
     # — sert à détecter un job chunké bloqué (JOB_STALL_TIMEOUT_SECONDS).
     updated_at: float = field(default_factory=time.time)
-    # Résultats par page, clé = page_number (1-based). Un dict plutôt qu'une
-    # liste préallouée (comme pour un job "legacy") car le nombre total de
-    # pages n'est qu'une estimation avant réception du dernier morceau.
+    # Résultats par page, clé = page_number (1-based) — même type que celui
+    # utilisé en local par _run_pdf_job pour un job "legacy" (results: dict[int,
+    # PageResult] = {}), mais promu en champ de job ici car un job chunké
+    # l'alimente au fil de plusieurs vagues de tâches successives (une par
+    # morceau reçu), pas d'un seul appel de fonction.
     results: dict[int, PageResult] = field(default_factory=dict)
     warnings: list[tuple[int, str]] = field(default_factory=list)
     errors: list[tuple[int, str]] = field(default_factory=list)

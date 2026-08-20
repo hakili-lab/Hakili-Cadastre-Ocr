@@ -6,6 +6,7 @@ Endpoints POST /transcribe (image) et POST /transcribe/pdf/start + GET /transcri
 
 import asyncio
 import logging
+from typing import Optional
 
 import anthropic
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
@@ -21,7 +22,7 @@ from app.models.schemas import (
 )
 from app.security import verify_api_key
 from app.services.claude_service import call_anthropic_ocr, describe_anthropic_error
-from app.services.job_store import create_job, get_job
+from app.services.job_store import create_job, get_job, PDFJob
 from app.utils.image_utils import (
     encode_bytes_to_base64,
     validate_content_type,
@@ -115,66 +116,104 @@ async def transcribe_image(file: UploadFile) -> TranscriptionResponse:
     return TranscriptionResponse(success=True, result=ocr_result)
 
 
+async def _process_page_and_track(
+    idx: int,
+    img_bytes: bytes,
+    job: PDFJob,
+    results: list[Optional[PageResult]],
+    warnings: list[tuple[int, str]],
+    errors: list[tuple[int, str]],
+) -> None:
+    """
+    Traite une page et écrit son résultat à sa propre position (`results[idx]`)
+    plutôt que de l'ajouter à une liste — les tâches, lancées en parallèle par
+    `asyncio.gather` dans `_run_pdf_job`, terminent dans un ordre arbitraire,
+    donc l'ordre des pages dans le résultat final doit être reconstruit par
+    index plutôt que par ordre d'arrivée.
+
+    `job.pages_done` est incrémenté ici, en effet de bord, dès la fin de CETTE
+    page — pas après que `gather` a fini d'attendre toutes les pages. Comme
+    `GET /pdf/status/{job_id}` lit `job.pages_done` directement sur l'objet
+    partagé, la progression avance en temps réel pendant que d'autres pages
+    sont encore en cours, sans qu'aucun verrou ne soit nécessaire (une seule
+    boucle d'événements : rien d'autre ne peut s'exécuter entre la lecture et
+    l'écriture de `job.pages_done`).
+    """
+    media_type = "image/png"  # convert_pdf_to_images produit du PNG
+    page_number = idx + 1
+    try:
+        ocr_result, image_b64, w, h = await _process_single_image(img_bytes, media_type)
+    except anthropic.APIError as exc:
+        detail = describe_anthropic_error(exc)
+        logger.error("Échec transcription page %d : %s", page_number, detail)
+        warnings.append((idx, f"Page {page_number} : {detail}"))
+        errors.append((idx, detail))
+    except Exception as exc:
+        logger.error("Échec transcription page %d : %s", page_number, exc)
+        warnings.append((idx, f"Page {page_number} : échec de la transcription."))
+        errors.append((idx, str(exc)))
+    else:
+        if ocr_result.final_warning:
+            warnings.append((idx, f"Page {page_number} : {ocr_result.final_warning}"))
+        results[idx] = PageResult(
+            page_number=page_number,
+            image_b64=image_b64,
+            media_type=media_type,
+            width=w,
+            height=h,
+            ocr=ocr_result,
+        )
+    finally:
+        job.pages_done += 1
+
+
 async def _run_pdf_job(job_id: str, page_images: list[tuple[bytes, int, int]]) -> None:
     """
-    Traite les pages d'un PDF une par une et met à jour le job après chaque page,
-    pour que /pdf/status/{job_id} reflète une progression réelle.
+    Traite les pages d'un PDF en parallèle via `asyncio.gather` — le nombre
+    d'appels Anthropic réellement en vol reste borné par le sémaphore global
+    de `claude_service.py` (`ANTHROPIC_CONCURRENCY`), pas par cette fonction :
+    `gather` démarre toutes les tâches immédiatement, mais chacune n'entre
+    dans son appel Claude qu'une fois une place de sémaphore obtenue.
     """
     job = get_job(job_id)
     if job is None:
         return
 
-    pages: list[PageResult] = []
-    global_warnings: list[str] = []
-    # Dernier message d'échec par page, réutilisé comme job.error si AUCUNE page
-    # n'a réussi (cf. plus bas) — sinon un job "done" avec pages=[] laisse le
-    # frontend sur un écran vide sans message ni moyen de revenir en arrière
-    # (AppContext.tsx : transcriptionResult devient null, ResultScreen ne
-    # s'affiche jamais).
-    last_page_error: str | None = None
+    results: list[Optional[PageResult]] = [None] * len(page_images)
+    warnings: list[tuple[int, str]] = []
+    errors: list[tuple[int, str]] = []
 
     try:
-        for idx, (img_bytes, orig_w, orig_h) in enumerate(page_images, start=1):
-            media_type = "image/png"  # convert_pdf_to_images produit du PNG
-            try:
-                ocr_result, image_b64, w, h = await _process_single_image(img_bytes, media_type)
-            except anthropic.APIError as exc:
-                detail = describe_anthropic_error(exc)
-                logger.error("Échec transcription page %d : %s", idx, detail)
-                global_warnings.append(f"Page {idx} : {detail}")
-                last_page_error = detail
-                job.pages_done = idx
-                continue
-            except Exception as exc:
-                logger.error("Échec transcription page %d : %s", idx, exc)
-                global_warnings.append(f"Page {idx} : échec de la transcription.")
-                last_page_error = str(exc)
-                job.pages_done = idx
-                continue
+        await asyncio.gather(*(
+            _process_page_and_track(idx, img_bytes, job, results, warnings, errors)
+            for idx, (img_bytes, _orig_w, _orig_h) in enumerate(page_images)
+        ))
 
-            if ocr_result.final_warning:
-                global_warnings.append(f"Page {idx} : {ocr_result.final_warning}")
-
-            pages.append(
-                PageResult(
-                    page_number=idx,
-                    image_b64=image_b64,
-                    media_type=media_type,
-                    width=w,
-                    height=h,
-                    ocr=ocr_result,
-                )
-            )
-            job.pages_done = idx
+        # Les tâches finissent dans un ordre arbitraire ; le résultat final
+        # doit rester dans l'ordre des pages du PDF (tri par page_number,
+        # jamais par ordre d'arrivée).
+        pages = sorted((p for p in results if p is not None), key=lambda p: p.page_number)
+        # Warnings/erreurs triés par index de page pour un message déterministe,
+        # plutôt que dans l'ordre (arbitraire) de complétion des tâches.
+        ordered_warnings = [msg for _idx, msg in sorted(warnings, key=lambda item: item[0])]
 
         if not pages and page_images:
             job.status = "error"
-            job.error = last_page_error or "La transcription a échoué pour toutes les pages du document."
+            # Dernier message par ordre de page (pas de complétion) réutilisé
+            # comme job.error si AUCUNE page n'a réussi — sinon un job "done"
+            # avec pages=[] laisse le frontend sur un écran vide sans message
+            # ni moyen de revenir en arrière (AppContext.tsx :
+            # transcriptionResult devient null, ResultScreen ne s'affiche jamais).
+            job.error = (
+                sorted(errors, key=lambda item: item[0])[-1][1]
+                if errors
+                else "La transcription a échoué pour toutes les pages du document."
+            )
             return
 
         job.result = PDFTranscriptionResult(
             pages=pages,
-            final_warning="\n".join(global_warnings) if global_warnings else None,
+            final_warning="\n".join(ordered_warnings) if ordered_warnings else None,
         )
         job.status = "done"
     except Exception as exc:

@@ -4,6 +4,7 @@ Logique d'appel à l'API Anthropic pour la transcription OCR de mathématiques m
 Reprend fidèlement la logique du script ocr_math_claude.py original.
 """
 
+import asyncio
 import json
 import logging
 import re
@@ -26,6 +27,20 @@ def _get_client() -> anthropic.AsyncAnthropic:
     """
     settings = get_settings()
     return anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+
+
+@lru_cache
+def _get_semaphore() -> asyncio.Semaphore:
+    """
+    Sémaphore global (partagé par tous les appelants, pas un par job PDF) limitant
+    le nombre d'appels Anthropic en vol simultanément à ANTHROPIC_CONCURRENCY —
+    sans ça, paralléliser les pages d'un PDF (_run_pdf_job) enverrait des dizaines
+    d'appels d'un coup et heurterait le rate limit Anthropic (429), et deux jobs
+    PDF concurrents (deux utilisateurs) cumuleraient leur charge sans limite.
+    Créé paresseusement (pas au niveau module) pour être instancié dans la même
+    event loop que celle où il sera utilisé.
+    """
+    return asyncio.Semaphore(get_settings().ANTHROPIC_CONCURRENCY)
 SYSTEM_PROMPT = (
     "Tu es un expert OCR spécialisé dans l'analyse de documents manuscrits : copies de "
     "mathématiques, papiers administratifs et documents comptables (tableaux, formulaires, "
@@ -229,7 +244,9 @@ async def call_anthropic_ocr(image_b64: str, media_type: str, image_width: int, 
     Envoie l'image (déjà en base64, déjà redimensionnée à image_width x image_height)
     à l'API Anthropic et retourne un OCRResult validé.
     Appel asynchrone (AsyncAnthropic) : ne bloque pas l'event loop FastAPI, ce qui permet
-    de traiter plusieurs pages en parallèle (asyncio.gather) côté appelant.
+    de traiter plusieurs pages en parallèle (asyncio.gather) côté appelant. Le sémaphore
+    global (_get_semaphore) borne le nombre d'appels Anthropic réellement en vol à
+    ANTHROPIC_CONCURRENCY, quel que soit le nombre de tâches qui attendent ici.
     """
     settings = get_settings()
     settings.validate()
@@ -237,30 +254,31 @@ async def call_anthropic_ocr(image_b64: str, media_type: str, image_width: int, 
     client = _get_client()
 
     try:
-        message = await client.messages.create(
-            model=settings.MODEL,
-            max_tokens=settings.MAX_TOKENS,
-            system=SYSTEM_PROMPT,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": media_type,
-                                "data": image_b64,
+        async with _get_semaphore():
+            message = await client.messages.create(
+                model=settings.MODEL,
+                max_tokens=settings.MAX_TOKENS,
+                system=SYSTEM_PROMPT,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": media_type,
+                                    "data": image_b64,
+                                },
                             },
-                        },
-                        {
-                            "type": "text",
-                            "text": build_user_prompt(image_width, image_height),
-                        },
-                    ],
-                }
-            ],
-        )
+                            {
+                                "type": "text",
+                                "text": build_user_prompt(image_width, image_height),
+                            },
+                        ],
+                    }
+                ],
+            )
     except anthropic.APIError as exc:
         logger.exception("Erreur lors de l'appel à l'API Anthropic")
         raise

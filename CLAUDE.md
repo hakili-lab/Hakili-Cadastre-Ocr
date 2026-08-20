@@ -8,12 +8,14 @@ Hakili OCR turns photos/scans/PDFs of handwritten math homework into structured,
 
 ## Repository layout
 
-This repo contains two independent, separately-run projects with no shared tooling or monorepo config:
+This repo contains two independent projects (no shared tooling or monorepo config for local dev), plus a root-level Docker Compose setup that runs both together:
 
-- `ocr-math-api/` — Python/FastAPI backend that calls the Claude (Anthropic) API to OCR handwritten math homework into structured LaTeX/Markdown.
-- `hakili-ocr/` — React 19 + TypeScript + Vite frontend that uploads images/PDFs to the backend and renders the results with an editable, block-by-block viewer.
+- `ocr-math-api/` — Python/FastAPI backend that calls the Claude (Anthropic) API to OCR handwritten math homework into structured LaTeX/Markdown. Own `Dockerfile`/`.dockerignore`.
+- `hakili-ocr/` — React 19 + TypeScript + Vite frontend that uploads images/PDFs to the backend and renders the results with an editable, block-by-block viewer. Own `Dockerfile`/`.dockerignore` (multi-stage build → static files served by nginx, `nginx.conf`).
+- `docker-compose.yml` (repo root) — builds and runs both services together; see "Docker / deployment" below.
+- `.env` / `.env.example` (repo root) — variables consumed by `docker-compose.yml` itself (distinct from each project's own `.env`/`.env.example`, which are for running that project outside Docker).
 
-They communicate only over HTTP: the frontend calls the backend at `http://127.0.0.1:8000` (hardcoded in `hakili-ocr/src/hooks/useTranscribe.ts`), and the backend's CORS middleware in `ocr-math-api/app/main.py` allows `http://localhost:5173` and `http://localhost:5174` (Vite's dev port, which increments if 5173 is already taken — e.g. by another dev server instance). Both must be run simultaneously for the app to work end to end.
+They communicate only over HTTP: the frontend calls the backend at `VITE_API_BASE_URL` (`hakili-ocr/src/services/apiClient.ts`, falls back to `http://127.0.0.1:8000` if unset), and the backend's CORS middleware in `ocr-math-api/app/main.py` allows the origins listed in `ALLOWED_ORIGINS` (`app/config.py`, defaults to `http://localhost:5173,http://localhost:5174` — Vite's dev port, which increments if 5173 is already taken). Both must be running for the app to work end to end, whether started locally or via Docker Compose.
 
 ## Commands
 
@@ -48,6 +50,22 @@ npm run preview
 
 - No test runner is configured. `test_table.mjs` at the project root is a standalone manual script (run with `node test_table.mjs`, not wired into `package.json`) for eyeballing how `remark-gfm`/`remark-rehype` turn a Markdown table into HTML — useful when debugging the table-rendering pipeline in `ResultScreen.tsx`.
 
+### Docker (repo root)
+
+Runs both services together via `docker-compose.yml` — backend on `:8000`, frontend (built + served by nginx) on `:8080`.
+
+```bash
+cp .env.example .env             # repo root — fill in ANTHROPIC_API_KEY, APP_API_KEY, etc.
+docker compose build
+docker compose up -d
+docker compose logs -f backend   # or: docker compose logs -f (both services)
+docker compose down              # stop; the `backend_data` volume (corrections DB + images) persists
+```
+
+- `VITE_API_BASE_URL`/`VITE_APP_API_KEY` are passed as Docker **build args** to the frontend image (see "Docker / deployment" below for why that means a built image is tied to one backend URL).
+- Rebuilding after a code change: `docker compose build` (add `--no-cache` if a layer seems stuck) then `docker compose up -d` again.
+- WeasyPrint (used by `POST /export/pdf`, see below) needs native GTK3/Pango libraries — the Docker image installs them (`ocr-math-api/Dockerfile`); running the backend outside Docker on Windows requires that runtime to be installed separately, or PDF export will fail (the other endpoints are unaffected — `weasyprint` is imported lazily inside `pdf_export_service.py` specifically for this reason).
+
 ## Backend architecture (`ocr-math-api/`)
 
 ### Image transcription (`POST /transcribe`)
@@ -67,19 +85,19 @@ Defined in `app/routers/transcription.py`:
 
 Key architectural point: bbox normalization always divides by the dimensions of the *resized* image actually sent to Claude, not the original upload — this consistency is what keeps frontend-rendered boxes aligned with the displayed (resized) image.
 
-The Anthropic client is `anthropic.AsyncAnthropic`, built once via a module-level `@lru_cache`d `_get_client()` in `claude_service.py` and reused across calls (HTTP keep-alive, no per-call reconnect). `call_anthropic_ocr` is `async` and does `await client.messages.create(...)` — this matters because the route handlers are `async def`; a blocking/sync Anthropic call there would stall the whole event loop, not just the current request.
+The Anthropic client is `anthropic.AsyncAnthropic`, built once via a module-level `@lru_cache`d `_get_client()` in `claude_service.py` and reused across calls (HTTP keep-alive, no per-call reconnect). `call_anthropic_ocr` is `async` and does `await client.messages.create(...)` — this matters because the route handlers are `async def`; a blocking/sync Anthropic call there would stall the whole event loop, not just the current request. The actual network call is wrapped in a **global** `asyncio.Semaphore` (`_get_semaphore()`, also `@lru_cache`d — created lazily rather than at module import time, so it binds to the event loop that's actually running when first used), sized by `ANTHROPIC_CONCURRENCY` (default `6`): bounds how many Anthropic calls are ever in flight at once, whether they come from one PDF job's parallel pages or from multiple jobs/users at the same time — protects against Anthropic rate limits (429s) and uncontrolled cost/load spikes.
 
 ### PDF transcription (`POST /transcribe/pdf/start` + `GET /transcribe/pdf/status/{job_id}`)
 
 PDFs are **not** processed synchronously within one HTTP request — a long PDF (dozens/hundreds of pages) would otherwise mean one very long blocking POST. Instead:
 
 1. `POST /transcribe/pdf/start` validates the upload, rasterizes every page to PNG via PyMuPDF (`convert_pdf_to_images`, 150 DPI), creates a job (`app/services/job_store.py`, in-memory `dict[job_id -> PDFJob]`), and schedules `_run_pdf_job(job_id, page_images)` as a **fire-and-forget** `asyncio.create_task` — the endpoint returns `{ job_id, pages_total }` immediately, before any page is transcribed.
-2. `_run_pdf_job` loops over pages **sequentially** (one `_process_single_image` `await` at a time — not yet parallelized, this is a known/expected future optimization), updating `job.pages_done` after each page so progress is observable mid-flight.
+2. `_run_pdf_job` processes all pages **in parallel** via `asyncio.gather` over `_process_page_and_track` (one task per page) — actual Anthropic concurrency stays bounded by the global semaphore above (`ANTHROPIC_CONCURRENCY`), not by this loop. Each task writes its `PageResult` to its own index in a preallocated `results` list (`results[idx]`, not `.append()`) since tasks finish in an arbitrary order under concurrency; `_run_pdf_job` re-sorts by `page_number` after `gather` returns so the final result stays in document order. Each task also increments `job.pages_done` itself, as a side effect right before it returns — this makes progress visible to the status endpoint in real time as pages complete, without waiting for `gather` (which only unblocks its caller, `_run_pdf_job`, once *every* task is done) to return. Per-page failures (`anthropic.APIError` or any other exception) are caught inside each task, same as before parallelization — one page failing never cancels the others; warnings/errors are collected as `(page_index, message)` pairs and sorted by index before being joined, for a deterministic `final_warning`/`job.error` regardless of completion order.
 3. `GET /transcribe/pdf/status/{job_id}` returns the job's current `status` (`"processing" | "done" | "error"`), `pages_done`/`pages_total`, and — once `"done"` — the full `PDFTranscriptionResult`. The frontend polls this endpoint (every 8s, `PDF_POLL_INTERVAL_MS` in `useTranscribe.ts`) to show real per-page progress instead of a generic loading animation.
 
 **Known limitation**: `job_store.py`'s job dict is process-local memory — jobs are lost on restart and it wouldn't work across multiple workers/processes (would need Redis or similar for that). The app is built as a **multi-user SaaS**, not a personal-use tool — this is an accepted limitation only as long as the deployment stays pinned to a single, vertically-scaled instance (see "Production readiness" below), not a long-term assumption.
 
-Config (`app/config.py`) is loaded once via `@lru_cache` from environment variables (`.env` via `python-dotenv`): `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` (default `claude-sonnet-5`), `MAX_IMAGE_SIZE_MB` (default `5`), `MAX_PDF_SIZE_MB` (default `500`), `MAX_PDF_PAGES` (default `600`), `JOB_TTL_SECONDS` (default `14400`, 4h), `MAX_TOKENS` (default `4096` in code — but `.env.example` sets it to `8192`, which is what a fresh `.env` copy will actually use).
+Config (`app/config.py`) is loaded once via `@lru_cache` from environment variables (`.env` via `python-dotenv`): `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` (default `claude-sonnet-5`), `MAX_IMAGE_SIZE_MB` (default `5`), `MAX_PDF_SIZE_MB` (default `500`), `MAX_PDF_PAGES` (default `600`), `JOB_TTL_SECONDS` (default `14400`, 4h), `ANTHROPIC_CONCURRENCY` (default `6`), `MAX_TOKENS` (default `4096` in code — but `.env.example` sets it to `8192`, which is what a fresh `.env` copy will actually use).
 
 Error handling convention in the router: `ValueError` → 400/422 depending on stage, `RuntimeError` (missing API key) → 500, `anthropic.APIError` → 502, anything else → 500. PDF uploads are validated against `MAX_PDF_SIZE_MB` (a dedicated limit, no longer derived from the image limit) and `MAX_PDF_PAGES` (rejected with 400 before any page is rasterized) — matches the frontend's client-side check in `UploadScreen.tsx` (5 MB for images, 500 MB for PDFs).
 
@@ -90,6 +108,18 @@ When a user fixes a block's transcribed text in the frontend, the app can option
 - Storage is SQLite (stdlib `sqlite3`, no new dependency) plus PNG files on disk, under `ocr-math-api/data/` (gitignored, path anchored on `__file__` so it doesn't depend on the cwd `uvicorn` is launched from) — consistent with the same single-process assumption as `job_store.py`, accepted for now only as long as the deployment stays pinned to one instance (see "Production readiness" below), not a long-term assumption given the app is a multi-user SaaS.
 - `app/services/correction_store.py` owns the schema (`corrections` table: id, image_path, block_label, confidence, original_markdown, corrected_markdown, error_description, created_at) and `save_correction(...)`, which writes the image then the row in one transaction. `sqlite3.Connection` isn't thread-safe, so each call opens/closes its own connection rather than sharing one — the endpoint invokes it via `asyncio.to_thread`, potentially from a different thread each time.
 - `app/routers/corrections.py` exposes `POST /corrections` as multipart (`image` file + form fields), reusing `validate_content_type`/`read_upload_with_limit` from `image_utils.py` (the latter streams the upload in chunks and aborts as soon as it exceeds `MAX_IMAGE_SIZE_MB`, rather than buffering the full body before checking) and rejecting an empty error description.
+
+### PDF export (`POST /export/pdf`)
+
+Lets the user download the transcription as a real vector PDF (selectable text, not a rasterized screenshot) — a deliberate second-generation approach replacing an earlier `html2canvas` + `jsPDF` attempt (rasterized, no selectable text).
+
+1. The frontend renders the transcription off-screen with `TranscriptExport.tsx` (React + KaTeX, a template dedicated to export — no Tailwind classes, no edit controls, no per-cell memoization) into a detached DOM node, waits two `requestAnimationFrame`s for KaTeX to paint, then serializes `.innerHTML` (`hakili-ocr/src/utils/exportPdf.tsx`, `exportTranscriptionToPdf`). Uncertain-content `==...==` markers are stripped first via `utils/exportSanitize.ts`'s `sanitizeExportPages` (shared with the Excel export below) — they only make sense in the interactive UI.
+2. That HTML fragment is POSTed as JSON (`{ html }`) to `POST /export/pdf` (`app/routers/export.py`).
+3. `app/services/pdf_export_service.py`'s `render_export_pdf` wraps the fragment in a full HTML document with a dedicated print stylesheet (`@page` size/margins, all-black text, table rows that avoid breaking across pages, cells that wrap instead of truncating) plus the local KaTeX stylesheet (`app/static/katex/katex.min.css`), then calls **WeasyPrint** (`HTML(string=...).write_pdf()`) — no headless browser, no JS execution needed since KaTeX already produced static HTML/CSS client-side.
+4. `weasyprint` is imported lazily inside `render_export_pdf` (not at module top-level): on Windows it requires the native GTK3/Pango runtime to be installed separately, and a top-level import would crash the whole API's startup — including endpoints unrelated to export — the moment that runtime is missing. The Docker image installs the required libraries (`libpango-1.0-0`, `libpangoft2-1.0-0`, `fonts-dejavu-core`) so export works out of the box there regardless of the host OS.
+5. `export_pdf` runs `render_export_pdf` via `asyncio.to_thread` (WeasyPrint's layout/rasterization is CPU-bound/blocking), same pattern as `correction_store.save_correction` and the transcription pipeline.
+
+A sibling **Excel export** (`.xlsx`) is entirely client-side, no backend involvement — see `utils/exportExcel.ts` under Frontend architecture below.
 
 ## Frontend architecture (`hakili-ocr/`)
 
@@ -104,7 +134,7 @@ Single-page app with four screens (`upload` / `preview` / `loading` / `result`) 
   - Normalizes `final_warning: null` (from the backend) to `undefined` for consistent optional-field handling in TS. Throws typed `TranscribeError` with `statusCode`/`isRetryable` based on backend HTTP status, built on the shared `apiClient.ts`.
 - `src/services/apiClient.ts` — shared `API_BASE`/`TranscribeError`/`fetchApi` used by both `useTranscribe.ts` and `correctionsApi.ts`.
 - `src/components/LoadingScreen.tsx` — reads `progress` from `useTranscription()`; when present (PDF), shows a real "Page X / Y" counter and a progress bar driven by actual `pagesDone/pagesTotal`; otherwise (single image) falls back to a generic cycling status-text animation, since there's no meaningful sub-progress for one image.
-- `src/components/UploadScreen.tsx` — drag-and-drop / file-picker entry point; client-side validates file type (PNG/JPEG/PDF) and size (5 MB images, 20 MB PDFs) before dispatching `SET_IMAGE`, mirroring the backend's own limits.
+- `src/components/UploadScreen.tsx` — drag-and-drop / file-picker entry point; client-side validates file type (PNG/JPEG/PDF) and size (5 MB images, 500 MB PDFs) before dispatching `SET_IMAGE`, mirroring the backend's own limits (page-count is only enforced server-side, once the file is uploaded).
 - `src/components/ResultScreen.tsx` — renders the source image with overlaid, color-coded (by confidence) bounding boxes alongside Markdown+LaTeX block content, supports selecting a block to scroll/highlight, and PDF page navigation (`pdfResult.pages`, `currentPageIndex`). This file holds only **orchestration** — top-level state (`editingBlockId`/`editDraft`/`editingCell`/`cellDraft`/`blockRefs`/`pendingCorrection`), handlers, and the JSX for the two columns (image panel, content panel); table-editing internals, drag-and-drop, and pure helpers are split into their own modules:
   - `src/utils/tableMarkdown.ts` — table markdown parsing: `tableLines`, `parseTableRowCells`, `withReplacedCell`, `getRowCellTexts`, `isTableBlockMarkdown`, `groupBlocksForRender`/`RenderGroup`. `parseTableRowCells` splits a row on `|` but is aware of `$...$`/`$$...$$` spans (and `\|`), so a literal `|` inside math (`$P(A|B)$`, `$|x|$`) doesn't get misparsed into two malformed cells.
   - `src/utils/confidenceColors.ts` — `getConfidenceColor`/`getConfidenceBorder`/`getConfidenceBoxBg`.
@@ -117,6 +147,11 @@ Single-page app with four screens (`upload` / `preview` / `loading` / `result`) 
   - `src/components/result/TableRow.tsx` — `TableDataRow`/`TableDataCell`/`CellEditor`, per-row/per-cell table rendering, described below.
   - `src/components/result/CorrectionModal.tsx` — modal shown after a block/cell edit is confirmed, prompting for a required free-text description of what was wrong; submits via `correctionsApi.ts` to `POST /corrections`.
   - `src/utils/cropImage.ts` — `cropImageToBlob(imageSrc, bbox)`: crops the source image to a block's bbox (via `createImageBitmap` + `<canvas>`) to attach to a correction submission. Works for both a plain image's `blob:` URL and a PDF page's base64 `data:` URL.
+  - `src/components/result/ResultHeader.tsx` — top bar: logo, PDF page nav, and the "Exporter en Excel"/"Exporter en PDF" buttons (purely presentational, `isExportingExcel`/`isExportingPdf` + handlers passed down from `ResultScreen.tsx`).
+  - `src/utils/exportPdf.tsx` — `exportTranscriptionToPdf(pages, filename)`: mounts `TranscriptExport` (below) off-screen, waits two `requestAnimationFrame`s for KaTeX to paint, serializes `.innerHTML`, POSTs it to the backend's `POST /export/pdf` (see "PDF export" under Backend architecture above) via `fetchApiBlob`, and downloads the returned PDF blob. Replaced an earlier `html2canvas` + `jsPDF` approach (rasterized screenshot, no selectable text).
+  - `src/components/result/TranscriptExport.tsx` — read-only Markdown/LaTeX render used only as the off-screen source for `exportPdf.tsx`'s serialization. Deliberately a separate template from `ContentPanel`/`TableRow` (no edit controls, no per-cell memoization, no Tailwind classes) since the serialized HTML ships without its stylesheet — only the backend's export template CSS (`h2`/`table`/`th`/`td` selectors, `.block`/`.table-wrap` classes) applies once it reaches WeasyPrint.
+  - `src/utils/exportExcel.ts` — `exportTranscriptionToExcel(pages, filename)`: builds an `.xlsx` workbook client-side (`xlsx`/SheetJS, dynamically `import()`-ed so it doesn't bloat the main bundle for users who never export), one sheet per source page. Table-row block groups become real Excel tables (header + one row per block, via `getRowCellTexts`); Markdown/LaTeX is written as raw source text (Excel can't render formulas, so `$x^2$` stays literally `$x^2$`). No backend involvement at all.
+  - `src/utils/exportSanitize.ts` — `sanitizeExportPages`, shared by both export paths: strips `==...==` uncertain-content markers from every block before export, since they only mean something in the interactive UI (`<mark>`/`\colorbox`), never in a downloaded file.
 
   Editing model: double-click a block to edit it in place (Valider/Annuler in the corner); for tables, double-click a *cell* rather than a row. Editing always shows raw Markdown/LaTeX source (no rich-text toggle). Confirming an edit that actually changed the text triggers `captureCorrection`, which snapshots the block, bbox, and image source and opens `CorrectionModal`; confirming the modal crops the image and posts to `/corrections`. A bbox drag alone (no text change) never triggers a correction capture, since there's no before/after text pair to record.
 
@@ -130,21 +165,21 @@ Styling is Tailwind v4 via `@tailwindcss/vite` (no `tailwind.config.js` — v4 u
 
 ## Known pending work
 
-- PDF pages are transcribed **sequentially** in `_run_pdf_job` — parallelizing with `asyncio.gather` + a semaphore (now unblocked by the async Claude client) is the next planned speed improvement, along with Anthropic prompt caching on the system prompt (identical across every page/call).
+- ~~PDF pages are transcribed sequentially~~ **done (2026-08-20)** — `_run_pdf_job` now processes pages in parallel via `asyncio.gather`, bounded by the global `ANTHROPIC_CONCURRENCY` semaphore (see "PDF transcription" above). Anthropic prompt caching on the system prompt (identical across every page/call) is still a separate, not-yet-implemented speed/cost improvement.
 - No rich-text/raw-code toggle for editing complex-formula cells (see "Known limitation" above) — accepted as a permanent product decision, not planned work.
 - End-to-end manual verification of the corrections-collection flow (double-click → edit → confirm → modal → submit → verify the SQLite row and image file on disk) is still outstanding.
 
 ## Production readiness — before opening to ~50-100 concurrent users
 
-Identified during a deployment-planning discussion (2026-08-13), not yet implemented. Ordered by priority:
+Identified during a deployment-planning discussion (2026-08-13); items #1, #3, #5 implemented 2026-08-20; item #2 implemented 2026-08-20 as part of PDF page parallelization (see strikethroughs below). Ordered by priority:
 
 1. ~~**Blocking event-loop calls**~~ **done** — `normalize_orientation`, `resize_for_vision` (PIL) and `convert_pdf_to_images` (PyMuPDF) now run via `await asyncio.to_thread(...)` in `transcription.py`, same pattern as `correction_store.save_correction` in `corrections.py`.
-2. **No concurrency limit on Anthropic calls** — nothing throttles how many `call_anthropic_ocr` calls run at once, so a burst of concurrent uploads can blow through Anthropic's rate limits (429s) or spike cost with no alerting. Fix: a module-level `asyncio.Semaphore` (e.g. 5-8 slots) in `claude_service.py` around `client.messages.create(...)`, plus a spend/budget alert configured on the Anthropic account (outside the codebase).
+2. ~~**No concurrency limit on Anthropic calls**~~ **done** — a global `asyncio.Semaphore` (`ANTHROPIC_CONCURRENCY`, default 6) in `claude_service.py` now bounds `client.messages.create(...)` (see "PDF transcription" above) — this was implemented together with PDF page parallelization since both needed the same cap. Still outstanding: a spend/budget alert on the Anthropic account itself (outside the codebase).
 3. ~~**`job_store.py` unbounded growth**~~ **done** — jobs now carry `created_at`, and `create_job` opportunistically purges `"done"`/`"error"` jobs older than `JOB_TTL_SECONDS` (default 4h) on every new job creation. Separately, the store remains process-local by design — since the app is a **multi-user SaaS** (not personal-use), this is only acceptable as long as the deployment is pinned to a **single instance, vertically scaled** (no autoscaling/multiple replicas); it becomes a hard blocker the moment horizontal scaling is needed, at which point it would need Redis or similar — not something to add prematurely.
 4. **SQLite write concurrency (`correction_store.py`)** — corrections are a low-frequency user action (not the hot path), so no preemptive change is planned; if `database is locked` errors actually show up in production, the low-cost fix is `PRAGMA journal_mode=WAL` (concurrent readers + one writer) rather than migrating to a different database.
-5. **Hardcoded config (blocks any deployment, independent of load)** — ~~`API_BASE` in the frontend~~ **done**: now `VITE_API_BASE_URL`, read in `src/services/apiClient.ts` (see also the API-key work below). Still outstanding: the CORS origins in `ocr-math-api/app/main.py` (`localhost:5173`/`5174`) are still hardcoded to local dev values — fix by driving them from an env var (e.g. `ALLOWED_ORIGINS`, read from `.env`).
+5. ~~**Hardcoded config**~~ **done** — `API_BASE` in the frontend is now `VITE_API_BASE_URL` (`src/services/apiClient.ts`, see also the API-key work below), and the CORS origins are now `ALLOWED_ORIGINS` (`app/config.py`, comma-separated, defaults to the local Vite ports), driven from `.env`/the root Docker `.env` rather than hardcoded in `main.py`.
 
-Agreed starting order: #1 and #5 first (quick, low-risk, unblock deployment), then #2 before real traffic at this scale; #3 and #4 can wait and be monitored once in production.
+Remaining open item from this list: #4 (SQLite `WAL`) stays reactive (fix only if `database is locked` actually shows up) — everything else on this list is now implemented.
 
 ## Frontend ↔ backend API key (implemented 2026-08-13)
 
@@ -152,27 +187,26 @@ The backend now requires a shared secret on every request to `/transcribe*` and 
 
 **Known limitation, by design, not a bug to fix**: a `VITE_*` variable is baked into the JS bundle at build time and is therefore visible to anyone who inspects the shipped frontend (view-source, Network tab) — it is *not* a secret once deployed. It blocks anonymous/automated direct hits on the bare API URL, but is not real user authentication and does not by itself prevent a motivated visitor from extracting the key and calling the API directly (see rate-limiting gap below).
 
-## Security review — before dockerizing / deploying (2026-08-13, not yet implemented)
+## Docker / deployment (implemented 2026-08-20)
 
-Audit done in preparation for containerizing the app. No Dockerfile/`.dockerignore` exists yet. Ordered by severity:
+The app is dockerized: `ocr-math-api/Dockerfile`, `hakili-ocr/Dockerfile`, and root `docker-compose.yml` running both services together (see "Docker" under Commands above for the exact build/run commands). Both Dockerfiles already build in the practices flagged as "decide up front" during the pre-dockerizing security review below: non-root `appuser` in both images, multi-stage builds (build tools/npm cache never ship in the final image), pinned base image tags (`python:3.12.7-slim-bookworm`, `node:24.14-slim` for the builder stages, `nginx:1.27-alpine` for the frontend runtime — not floating, though not pinned to a digest), and `data/` is a named Docker volume (`backend_data`) mounted at `/app/data`, never copied into the image.
+
+**Decided**: `VITE_API_BASE_URL`/`VITE_APP_API_KEY` are baked in at `docker compose build` time (passed as build args from the root `.env`), not injected at container startup — so a single built frontend image is tied to one backend URL/key pair. Rebuilding the frontend image is required to point it at a different backend (e.g. switching environments), rather than just restarting the container with different env vars. Accepted for the current single-environment deployment; would need revisiting (e.g. an entrypoint script substituting a placeholder in the built JS/HTML) if multiple environments from one image ever become a requirement.
+
+## Security review — before dockerizing / deploying (2026-08-13; Docker-specific items resolved 2026-08-20)
+
+Audit done in preparation for containerizing the app. Ordered by severity — items resolved by the Docker setup above are struck through; the rest are still open.
 
 **Critical:**
 1. ~~**No cap on PDF page count**~~ **done** — `convert_pdf_to_images` (`utils/image_utils.py`) now takes `max_pages` and rejects (`ValueError` → 400) before rasterizing any page if the PDF exceeds `MAX_PDF_PAGES` (default 600). PDF size limit is now also a dedicated `MAX_PDF_SIZE_MB` (default 500) rather than derived from the image limit.
-2. **No `.dockerignore`** — must be created *before* any Dockerfile, otherwise a naive `COPY . .` would bake the real `.env` (live `ANTHROPIC_API_KEY` and `APP_API_KEY`) and `data/` (SQLite + user-submitted image crops) directly into image layers — a real secret/data leak if that image is ever pushed anywhere, even a "private" registry.
+2. ~~**No `.dockerignore`**~~ **done** — both `ocr-math-api/.dockerignore` and `hakili-ocr/.dockerignore` exist and exclude `.env`/`.env.*`, `data/` (backend) and `node_modules/`/`dist/`/`.env*` (frontend), so a `COPY . .`/`COPY app ./app` doesn't bake secrets or generated output into image layers.
 
-**Important:**
+**Important — still open:**
 3. **No rate limiting on any endpoint** — combined with the `VITE_APP_API_KEY` limitation above, nothing stops a client who has extracted the key from the shipped frontend bundle from hammering `/transcribe` — direct, uncapped cost exposure via the Anthropic API. Needs a per-key/per-IP rate limit (e.g. `slowapi`, or handled at the reverse-proxy/CDN level).
 4. **Generic exception handlers leak internal error text to the client** — e.g. `detail=f"Erreur inattendue : {exc}"` in `transcription.py`/`corrections.py` returns the raw Python exception message in the HTTP response instead of logging it server-side only and returning a generic message.
-5. **Non-constant-time API key comparison** — `provided_key != settings.APP_API_KEY` in `app/security.py` is a theoretical timing-attack surface. Fix: `secrets.compare_digest(...)` instead of `!=`, cheap to apply.
-6. **Dependencies unpinned, never audited** (see also the earlier backend audit above) — worth running `pip-audit` once before freezing a Docker image; a vulnerable transitive dependency is harder to patch once baked into a shipped image than in a dev environment.
-
-**Docker best practices to build in from the first Dockerfile** (not fixes to existing code, just decisions to make when writing it):
-7. Run the container as a non-root user.
-8. Multi-stage build — don't ship build tools/pip cache/dev deps in the final image.
-9. Pin the base image tag (and ideally digest), not a floating `python:3.x`.
-10. `data/` must be a mounted volume, never copied into the image (same persistent-disk requirement already noted in the deployment discussion above).
-11. Vite bakes `VITE_*` vars in at *build* time — a single built image can't be reused across environments (dev/staging/prod) with different backend URLs unless values are injected at container *startup* (e.g. an entrypoint script substituting a placeholder in the built JS/HTML) rather than at `docker build` time. Decide up front whether that flexibility is needed.
+5. **Non-constant-time API key comparison** — `provided_key != settings.APP_API_KEY` in `app/security.py` is still a theoretical timing-attack surface. Fix: `secrets.compare_digest(...)` instead of `!=`, cheap to apply.
+6. **Dependencies unpinned, never audited** — `requirements.txt` still uses `>=` floors, not exact pins; worth running `pip-audit` once before freezing a Docker image, and pinning the base image by digest (not just tag) for full reproducibility.
 
 **Minor, not urgent:**
-12. `allow_credentials=True` in the CORS middleware isn't needed (auth is header-based, not cookie-based) — harmless as-is but superfluous.
-13. No security headers (CSP, etc.) — normally the responsibility of whatever sits in front of the app (nginx/Vercel/Railway), not the FastAPI app itself.
+7. `allow_credentials=True` in the CORS middleware isn't needed (auth is header-based, not cookie-based) — harmless as-is but superfluous.
+8. No security headers (CSP, etc.) — normally the responsibility of whatever sits in front of the app (nginx/Vercel/Railway); `hakili-ocr/nginx.conf` doesn't set any yet.

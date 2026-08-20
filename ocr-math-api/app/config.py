@@ -29,6 +29,10 @@ class Settings:
     # sur un process qui tourne longtemps. Défaut : 4h.
     JOB_TTL_SECONDS: int = int(os.getenv("JOB_TTL_SECONDS", "14400"))
     MAX_TOKENS: int = int(os.getenv("MAX_TOKENS", "4096"))
+    # Nombre max d'appels Anthropic simultanés (sémaphore global, claude_service.py).
+    # Protège contre le rate limit Anthropic (429) et les pics de coût lors du
+    # traitement parallèle des pages d'un PDF (_run_pdf_job).
+    ANTHROPIC_CONCURRENCY: int = int(os.getenv("ANTHROPIC_CONCURRENCY", "6"))
     # Origines autorisées par CORS, séparées par des virgules. Par défaut les
     # ports Vite en dev local ; à surcharger en déploiement (ex. l'origine du
     # frontend dockerisé) via la variable d'environnement ALLOWED_ORIGINS.

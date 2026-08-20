@@ -28,6 +28,13 @@ class Settings:
     # purgé du store en mémoire — évite une croissance indéfinie de job_store
     # sur un process qui tourne longtemps. Défaut : 4h.
     JOB_TTL_SECONDS: int = int(os.getenv("JOB_TTL_SECONDS", "14400"))
+    # Durée (secondes) sans nouveau morceau reçu au-delà de laquelle un job PDF
+    # "chunké" (upload_finalized=False) est considéré bloqué et purgé — sans ça,
+    # un client qui abandonne un upload par morceaux en cours de route (onglet
+    # fermé, connexion coupée) laisserait un job "processing" indéfiniment
+    # impurgeable (job_store._purge_expired_jobs ne balaie aujourd'hui que
+    # done/error). Défaut : 30 min.
+    JOB_STALL_TIMEOUT_SECONDS: int = int(os.getenv("JOB_STALL_TIMEOUT_SECONDS", "1800"))
     MAX_TOKENS: int = int(os.getenv("MAX_TOKENS", "4096"))
     # Nombre max d'appels Anthropic simultanés (sémaphore global, claude_service.py).
     # Protège contre le rate limit Anthropic (429) et les pics de coût lors du
@@ -39,7 +46,7 @@ class Settings:
     ALLOWED_ORIGINS: list[str] = [
         origin.strip()
         for origin in os.getenv(
-            "ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:5174"
+            "ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:5174,http://localhost:8021"
         ).split(",")
         if origin.strip()
     ]

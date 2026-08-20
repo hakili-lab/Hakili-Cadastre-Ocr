@@ -15,8 +15,11 @@ import type {
   TranscriptionPayload,
   PdfJobStartResponse,
   PdfJobStatusResponse,
+  PdfChunkedStartRequest,
+  PdfChunkAckResponse,
 } from '../types';
 import { fetchApi, TranscribeError } from '../services/apiClient';
+import { getPdfPageCount, splitPdfIntoChunks, PDF_CHUNK_PAGE_COUNT_THRESHOLD, PDF_CHUNK_SIZE_PAGES } from '../utils/pdfChunking';
 
 export { TranscribeError };
 
@@ -105,6 +108,35 @@ async function fetchPdfJobStatus(jobId: string): Promise<PdfJobStatusResponse> {
   return fetchApi<PdfJobStatusResponse>(`/transcribe/pdf/status/${jobId}`);
 }
 
+/**
+ * POST /transcribe/pdf/start-chunked : ouvre un job PDF alimenté par plusieurs morceaux
+ * envoyés successivement (voir `uploadPdfChunk` et `utils/pdfChunking.ts`), au lieu d'un
+ * fichier complet en un seul POST comme `startPdfJob` — utilisé pour les PDF au-dessus de
+ * `PDF_CHUNK_PAGE_COUNT_THRESHOLD` pages, où attendre la fin de l'upload avant de commencer
+ * le traitement gaspillerait du temps.
+ */
+async function startPdfJobChunked(pagesExpected: number): Promise<PdfJobStartResponse> {
+  const body: PdfChunkedStartRequest = { pages_expected: pagesExpected };
+  return fetchApi<PdfJobStartResponse>('/transcribe/pdf/start-chunked', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+/**
+ * POST /transcribe/pdf/{jobId}/chunk : envoie un morceau (sous-PDF produit par
+ * `splitPdfIntoChunks`) d'un job ouvert par `startPdfJobChunked`. Les morceaux doivent être
+ * envoyés strictement l'un après l'autre (voir la boucle séquentielle dans `startPdfChunkedFlow`
+ * ci-dessous) — le backend numérote lui-même les pages à réception, dans l'ordre d'arrivée.
+ */
+async function uploadPdfChunk(jobId: string, chunkBlob: Blob, isLastChunk: boolean): Promise<PdfChunkAckResponse> {
+  const formData = new FormData();
+  formData.append('file', chunkBlob, 'chunk.pdf');
+  formData.append('is_last_chunk', String(isLastChunk));
+  return fetchApi<PdfChunkAckResponse>(`/transcribe/pdf/${jobId}/chunk`, { method: 'POST', body: formData });
+}
+
 /** Progression réelle page par page d'un job PDF, telle qu'exposée par `UseTranscriptionResult.progress`. */
 export interface TranscriptionProgress {
   pagesDone: number;
@@ -149,9 +181,67 @@ export function useTranscription(): UseTranscriptionResult {
 
   const [mockPdfResult, setMockPdfResult] = useState<PDFTranscriptionResult | null>(null);
 
+  // État du flux chunké (gros PDF) : startPdfMutation n'est pas utilisée dans ce cas (le job est
+  // ouvert via startPdfJobChunked, pas startPdfJob), donc son isPending/error ne le couvre pas —
+  // isChunkedStarting comble la fenêtre entre l'appel à start() et le premier `pdfJobId` connu
+  // (comptage de pages + ouverture du job, avant tout envoi de morceau), chunkUploadError
+  // capture un échec de l'ouverture du job ou de l'envoi d'un morceau.
+  const [isChunkedStarting, setIsChunkedStarting] = useState(false);
+  const [chunkUploadError, setChunkUploadError] = useState<TranscribeError | null>(null);
+
+  /**
+   * Décide entre le flux `/pdf/start` classique (petit PDF, fichier entier en un POST) et le
+   * flux chunké (gros PDF, au-dessus de PDF_CHUNK_PAGE_COUNT_THRESHOLD pages) : découpe le
+   * fichier via `splitPdfIntoChunks` et envoie chaque morceau l'un après l'autre — le morceau
+   * N+1 n'est envoyé qu'une fois la réponse du morceau N reçue, jamais en parallèle. C'est ce qui
+   * permet au traitement Claude du morceau N de continuer côté backend PENDANT que N+1 est
+   * envoyé (upload et traitement se chevauchent), sans qu'aucun ordre n'ait besoin d'être
+   * communiqué au serveur : dès que `pdfJobId` est posé, le polling existant (`statusQuery`)
+   * prend le relais exactement comme pour le flux classique — `progress`/`data` reflètent déjà
+   * la progression réelle pendant que la boucle d'envoi ci-dessous est encore en cours.
+   */
+  const startPdfChunkedFlow = useCallback(async (file: File) => {
+    let pageCount: number;
+    try {
+      pageCount = await getPdfPageCount(file);
+    } catch {
+      // PDF illisible côté client (fichier corrompu ?) — laisse le backend faire sa propre
+      // validation via le flux classique plutôt que d'échouer silencieusement ici.
+      startPdfMutation.mutate(file);
+      return;
+    }
+
+    if (pageCount <= PDF_CHUNK_PAGE_COUNT_THRESHOLD) {
+      startPdfMutation.mutate(file);
+      return;
+    }
+
+    setIsChunkedStarting(true);
+    try {
+      const jobStart = await startPdfJobChunked(pageCount);
+      setPdfJobId(jobStart.job_id);
+
+      const chunks = await splitPdfIntoChunks(file, PDF_CHUNK_SIZE_PAGES);
+      for (let i = 0; i < chunks.length; i++) {
+        const isLastChunk = i === chunks.length - 1;
+        await uploadPdfChunk(jobStart.job_id, chunks[i].blob, isLastChunk);
+      }
+    } catch (err) {
+      setChunkUploadError(
+        err instanceof TranscribeError
+          ? err
+          : new TranscribeError("Échec de l'envoi du PDF par morceaux.", 0, true)
+      );
+    } finally {
+      setIsChunkedStarting(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const start = useCallback((file: File) => {
     setPdfJobId(null);
     setMockPdfResult(null);
+    setChunkUploadError(null);
     imageMutation.reset();
     startPdfMutation.reset();
 
@@ -161,14 +251,15 @@ export function useTranscription(): UseTranscriptionResult {
       return;
     }
     if (isPdf) {
-      startPdfMutation.mutate(file);
+      void startPdfChunkedFlow(file);
     } else {
       imageMutation.mutate(file);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const isPdfFlow = pdfJobId !== null || startPdfMutation.isPending || mockPdfResult !== null;
+  const isPdfFlow =
+    pdfJobId !== null || startPdfMutation.isPending || mockPdfResult !== null || isChunkedStarting;
 
   if (isPdfFlow) {
     if (USE_MOCK) {
@@ -187,10 +278,14 @@ export function useTranscription(): UseTranscriptionResult {
 
     return {
       start,
-      isPending: startPdfMutation.isPending || (pdfJobId !== null && (!jobStatus || jobStatus.status === 'processing')),
-      isError: startPdfMutation.isError || jobFailed || statusQuery.isError,
+      isPending:
+        startPdfMutation.isPending ||
+        isChunkedStarting ||
+        (pdfJobId !== null && (!jobStatus || jobStatus.status === 'processing')),
+      isError: startPdfMutation.isError || jobFailed || statusQuery.isError || chunkUploadError !== null,
       error:
         startPdfMutation.error ??
+        chunkUploadError ??
         (jobFailed
           ? new TranscribeError(jobStatus?.error || 'Erreur inconnue lors du traitement du PDF.', 500, true)
           : statusQuery.error ?? null),

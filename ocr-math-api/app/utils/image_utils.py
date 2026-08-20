@@ -40,15 +40,17 @@ def validate_content_type(content_type: str) -> str:
 _READ_CHUNK_SIZE = 1024 * 1024  # 1 Mo
 
 
-async def read_upload_with_limit(file: UploadFile, max_mb: float, label: str = "Fichier") -> bytes:
+async def read_upload_with_byte_limit(file: UploadFile, max_bytes: int, label: str = "Fichier") -> bytes:
     """
-    Lit `file` par blocs et lève une `ValueError` dès que la taille cumulée
-    dépasse `max_mb`, sans bufferiser le reste du corps. Contrairement à
-    `await file.read()` suivi d'une vérification de taille après coup, un
-    client qui envoie un fichier arbitrairement gros ne peut pas faire
-    exploser la mémoire du serveur avant que la limite soit contrôlée.
+    Cœur commun à `read_upload_with_limit` (budget en Mo, un seul appel — image ou PDF envoyé
+    d'un coup) et à la lecture d'un morceau d'upload PDF fractionné (budget en octets, cumulé sur
+    plusieurs requêtes liées à un même job — voir `upload_pdf_chunk` dans
+    `routers/transcription.py`, où `max_bytes` est le budget *restant* du job, pas une constante
+    fixe). Lit `file` par blocs de 1 Mo et lève une `ValueError` dès que la taille cumulée dépasse
+    `max_bytes`, sans bufferiser le reste du corps. Contrairement à `await file.read()` suivi
+    d'une vérification de taille après coup, un client qui envoie un fichier arbitrairement gros
+    ne peut pas faire exploser la mémoire du serveur avant que la limite soit contrôlée.
     """
-    max_bytes = int(max_mb * 1024 * 1024)
     chunks: list[bytes] = []
     total = 0
     while True:
@@ -58,11 +60,16 @@ async def read_upload_with_limit(file: UploadFile, max_mb: float, label: str = "
         total += len(chunk)
         if total > max_bytes:
             raise ValueError(
-                f"{label} trop lourd (> {max_mb:.0f} Mo). "
+                f"{label} trop lourd (> {max_bytes / (1024 * 1024):.0f} Mo). "
                 "Compressez le fichier avant de réessayer."
             )
         chunks.append(chunk)
     return b"".join(chunks)
+
+
+async def read_upload_with_limit(file: UploadFile, max_mb: float, label: str = "Fichier") -> bytes:
+    """Variante à budget unique en Mo (un seul appel HTTP) de `read_upload_with_byte_limit` — voir son docstring."""
+    return await read_upload_with_byte_limit(file, int(max_mb * 1024 * 1024), label)
 
 
 def normalize_orientation(raw_bytes: bytes, media_type: str) -> bytes:

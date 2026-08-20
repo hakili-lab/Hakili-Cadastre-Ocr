@@ -113,6 +113,31 @@ class PDFJobStatusResponse(BaseModel):
     error: Optional[str] = None
 
 
+class PDFChunkedStartRequest(BaseModel):
+    """
+    Corps de POST /transcribe/pdf/start-chunked : ouvre un job PDF alimenté par plusieurs
+    morceaux envoyés successivement, plutôt que par un seul fichier complet (voir
+    POST /transcribe/pdf/{job_id}/chunk). `pages_expected` est une estimation annoncée par le
+    client (le nombre de pages est connu côté client via pdf-lib avant tout envoi) — non fiable
+    en soi, elle est plafonnée à MAX_PDF_PAGES côté serveur avant de devenir le budget de pages
+    cumulé du job (job_store.create_chunked_job).
+    """
+
+    pages_expected: int = Field(..., gt=0)
+
+
+class PDFChunkAckResponse(BaseModel):
+    """
+    Réponse à chaque POST /transcribe/pdf/{job_id}/chunk — un simple accusé de réception (le
+    morceau a été reçu et sa rasterisation programmée), pas le résultat de la transcription :
+    celui-ci n'est disponible que via GET /transcribe/pdf/status/{job_id} une fois `status == "done"`.
+    """
+
+    job_id: str
+    pages_received: int
+    status: JobStatus
+
+
 class CorrectionResponse(BaseModel):
     """Confirmation d'enregistrement d'une correction (image + avant/après + erreur)."""
 

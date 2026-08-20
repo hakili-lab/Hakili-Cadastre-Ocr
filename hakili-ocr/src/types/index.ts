@@ -130,3 +130,17 @@ export interface PdfJobStatusResponse {
   /** Présent uniquement quand `status === 'error'`. */
   error?: string;
 }
+
+// === Types upload PDF par morceaux (gros documents, voir utils/pdfChunking.ts) ===
+
+/** Corps de `POST /transcribe/pdf/start-chunked` — ouvre un job alimenté par plusieurs morceaux au lieu d'un fichier complet. */
+export interface PdfChunkedStartRequest {
+  pages_expected: number;
+}
+
+/** Réponse de `POST /transcribe/pdf/{job_id}/chunk` — un accusé de réception, pas le résultat final (voir `PdfJobStatusResponse` pour ça). */
+export interface PdfChunkAckResponse {
+  job_id: string;
+  pages_received: number;
+  status: PdfJobStatus;
+}

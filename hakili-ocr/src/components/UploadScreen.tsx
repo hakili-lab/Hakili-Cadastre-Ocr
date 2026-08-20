@@ -10,7 +10,7 @@ import { useApp } from '../context/AppContext';
 
 const VALID_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/jpg'];
 const MAX_IMAGE_SIZE = 5 * 1024 * 1024;
-const MAX_PDF_SIZE = 20 * 1024 * 1024;
+const MAX_PDF_SIZE = 500 * 1024 * 1024;
 
 export default function UploadScreen() {
   return (
@@ -64,7 +64,7 @@ function UploadZone() {
     const maxSize = isPdf ? MAX_PDF_SIZE : MAX_IMAGE_SIZE;
     if (file.size > maxSize) {
       const sizeMo = Math.round(file.size / (1024 * 1024));
-      const limitMo = isPdf ? '20' : '5';
+      const limitMo = isPdf ? '500' : '5';
       setError(
         `Ce ${isPdf ? 'PDF' : 'fichier'} fait ${sizeMo} Mo. La limite est de ${limitMo} Mo${isPdf ? ' — essayez de le scinder.' : '.'}`
       );
@@ -157,7 +157,7 @@ function UploadZone() {
           </div>
         ) : (
           <p className="font-sans text-sm text-ink-muted">
-            PNG, JPEG ou PDF · 5 Mo max, 20 Mo pour un PDF
+            PNG, JPEG ou PDF · 5 Mo max, 500 Mo pour un PDF
           </p>
         )}
 

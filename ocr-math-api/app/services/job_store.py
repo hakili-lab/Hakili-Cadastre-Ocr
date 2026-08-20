@@ -8,10 +8,12 @@ Limite connue : store en mémoire du process — convient à un serveur mono-pro
 personnel). Pour un déploiement multi-workers, il faudrait un store partagé (Redis, etc.).
 """
 
+import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
+from app.config import get_settings
 from app.models.schemas import JobStatus, PDFTranscriptionResult
 
 
@@ -23,12 +25,32 @@ class PDFJob:
     status: JobStatus = "processing"
     result: Optional[PDFTranscriptionResult] = None
     error: Optional[str] = None
+    created_at: float = field(default_factory=time.time)
 
 
 _jobs: dict[str, PDFJob] = {}
 
 
+def _purge_expired_jobs() -> None:
+    """
+    Supprime les jobs terminés (done/error) plus vieux que JOB_TTL_SECONDS.
+    Appelé à chaque création de job plutôt que via une tâche planifiée à part :
+    le store est en mémoire de process, donc un balayage opportuniste au fil
+    des créations suffit à empêcher sa croissance indéfinie.
+    """
+    ttl = get_settings().JOB_TTL_SECONDS
+    now = time.time()
+    expired = [
+        job_id
+        for job_id, job in _jobs.items()
+        if job.status in ("done", "error") and now - job.created_at > ttl
+    ]
+    for job_id in expired:
+        del _jobs[job_id]
+
+
 def create_job(pages_total: int) -> PDFJob:
+    _purge_expired_jobs()
     job = PDFJob(job_id=uuid.uuid4().hex, pages_total=pages_total)
     _jobs[job.job_id] = job
     return job

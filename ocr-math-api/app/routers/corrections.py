@@ -14,7 +14,7 @@ from app.config import get_settings
 from app.models.schemas import CorrectionResponse, ErrorResponse
 from app.security import verify_api_key
 from app.services.correction_store import save_correction
-from app.utils.image_utils import validate_content_type, validate_size
+from app.utils.image_utils import validate_content_type, read_upload_with_limit
 
 logger = logging.getLogger(__name__)
 
@@ -56,9 +56,8 @@ async def create_correction(
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
-    image_bytes = await image.read()
     try:
-        validate_size(image_bytes, settings.MAX_IMAGE_SIZE_MB)
+        image_bytes = await read_upload_with_limit(image, settings.MAX_IMAGE_SIZE_MB, label="Image")
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 

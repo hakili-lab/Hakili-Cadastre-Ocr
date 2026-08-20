@@ -8,6 +8,7 @@ import io
 import logging
 import math
 
+from fastapi import UploadFile
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 logger = logging.getLogger(__name__)
@@ -36,15 +37,32 @@ def validate_content_type(content_type: str) -> str:
     return "image/jpeg" if SUPPORTED_MEDIA_TYPES[normalized] == "jpeg" else "image/png"
 
 
-def validate_size(raw_bytes: bytes, max_mb: float) -> None:
-    """Lève une `ValueError` si `raw_bytes` dépasse `max_mb` (appelé avec le seuil image ou 4x pour un PDF)."""
-    size_mb = len(raw_bytes) / (1024 * 1024)
-    if size_mb > max_mb:
-        raise ValueError(
-            f"Image trop lourde ({size_mb:.2f} Mo). "
-            f"Limite acceptée : {max_mb} Mo. "
-            "Compressez l'image avant de réessayer."
-        )
+_READ_CHUNK_SIZE = 1024 * 1024  # 1 Mo
+
+
+async def read_upload_with_limit(file: UploadFile, max_mb: float, label: str = "Fichier") -> bytes:
+    """
+    Lit `file` par blocs et lève une `ValueError` dès que la taille cumulée
+    dépasse `max_mb`, sans bufferiser le reste du corps. Contrairement à
+    `await file.read()` suivi d'une vérification de taille après coup, un
+    client qui envoie un fichier arbitrairement gros ne peut pas faire
+    exploser la mémoire du serveur avant que la limite soit contrôlée.
+    """
+    max_bytes = int(max_mb * 1024 * 1024)
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(_READ_CHUNK_SIZE)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise ValueError(
+                f"{label} trop lourd (> {max_mb:.0f} Mo). "
+                "Compressez le fichier avant de réessayer."
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def normalize_orientation(raw_bytes: bytes, media_type: str) -> bytes:
@@ -154,14 +172,28 @@ def resize_for_vision(raw_bytes: bytes, media_type: str) -> tuple[bytes, int, in
 
 # ─── PDF → Images ───────────────────────────────────────────────
 
-def convert_pdf_to_images(raw_bytes: bytes, dpi: int = 150) -> list[tuple[bytes, int, int]]:
+def convert_pdf_to_images(
+    raw_bytes: bytes, dpi: int = 150, max_pages: int | None = None
+) -> list[tuple[bytes, int, int]]:
     """
     Convertit un PDF en liste d'images (bytes, width, height).
     Chaque page est rendue en PNG à la résolution donnée.
+
+    Si `max_pages` est fourni et que le PDF en contient davantage, lève une
+    `ValueError` avant de rendre la moindre page — un PDF bien en dessous de
+    la limite de taille peut quand même contenir des milliers de pages,
+    déclenchant chacune un rendu PyMuPDF et un appel Claude payant.
     """
     import fitz  # PyMuPDF — import différé pour ne pas rendre le démarrage du serveur dépendant de sa présence
 
     doc = fitz.open(stream=raw_bytes, filetype="pdf")
+    if max_pages is not None and len(doc) > max_pages:
+        page_count = len(doc)
+        doc.close()
+        raise ValueError(
+            f"PDF trop long ({page_count} pages). Limite acceptée : {max_pages} pages."
+        )
+
     pages: list[tuple[bytes, int, int]] = []
 
     for page_num in range(len(doc)):

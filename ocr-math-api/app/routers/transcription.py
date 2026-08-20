@@ -27,7 +27,7 @@ from app.utils.image_utils import (
     validate_content_type,
     resize_for_vision,
     normalize_orientation,
-    validate_size,
+    read_upload_with_limit,
     convert_pdf_to_images,
 )
 
@@ -43,9 +43,17 @@ _background_tasks: set[asyncio.Task] = set()
 
 
 async def _process_single_image(raw_bytes: bytes, media_type: str):
-    """Pipeline commun : orientation → resize → base64 → Claude."""
-    raw_bytes = normalize_orientation(raw_bytes, media_type)
-    raw_bytes, image_width, image_height = resize_for_vision(raw_bytes, media_type)
+    """
+    Pipeline commun : orientation → resize → base64 → Claude.
+    `normalize_orientation`/`resize_for_vision` (PIL) sont des appels CPU
+    synchrones ; les passer par `asyncio.to_thread` évite qu'ils ne bloquent
+    la boucle d'événements pendant leur exécution (impact direct sur les
+    autres requêtes concurrentes, ex. le polling de statut d'un autre job PDF).
+    """
+    raw_bytes = await asyncio.to_thread(normalize_orientation, raw_bytes, media_type)
+    raw_bytes, image_width, image_height = await asyncio.to_thread(
+        resize_for_vision, raw_bytes, media_type
+    )
     image_b64 = encode_bytes_to_base64(raw_bytes)
     ocr_result = await call_anthropic_ocr(image_b64, media_type, image_width, image_height)
     return ocr_result, image_b64, image_width, image_height
@@ -74,9 +82,8 @@ async def transcribe_image(file: UploadFile) -> TranscriptionResponse:
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
-    raw_bytes = await file.read()
     try:
-        validate_size(raw_bytes, settings.MAX_IMAGE_SIZE_MB)
+        raw_bytes = await read_upload_with_limit(file, settings.MAX_IMAGE_SIZE_MB, label="Image")
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
@@ -196,16 +203,20 @@ async def start_pdf_transcription(file: UploadFile) -> PDFJobStartResponse:
             detail="Le fichier doit être un PDF.",
         )
 
-    raw_bytes = await file.read()
-    size_mb = len(raw_bytes) / (1024 * 1024)
-    if size_mb > settings.MAX_IMAGE_SIZE_MB * 4:  # PDF peut être plus lourd
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"PDF trop lourd ({size_mb:.1f} Mo). Limite : {settings.MAX_IMAGE_SIZE_MB * 4:.0f} Mo.",
-        )
+    try:
+        raw_bytes = await read_upload_with_limit(file, settings.MAX_PDF_SIZE_MB, label="PDF")
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     try:
-        page_images = convert_pdf_to_images(raw_bytes, dpi=150)
+        # convert_pdf_to_images (PyMuPDF) est un appel CPU synchrone ; via
+        # asyncio.to_thread pour ne pas geler la boucle d'événements le temps
+        # de rasteriser potentiellement des centaines de pages.
+        page_images = await asyncio.to_thread(
+            convert_pdf_to_images, raw_bytes, dpi=150, max_pages=settings.MAX_PDF_PAGES
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("Échec de la conversion PDF")
         raise HTTPException(

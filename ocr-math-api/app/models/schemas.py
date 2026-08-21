@@ -103,7 +103,16 @@ class PDFJobStartResponse(BaseModel):
 
 
 class PDFJobStatusResponse(BaseModel):
-    """État d'avancement d'un job de transcription PDF, interrogé par polling."""
+    """
+    État d'avancement d'un job de transcription PDF, interrogé par polling.
+
+    `result` peut être non-null AVANT que `status` passe à `"done"` : dès qu'au moins
+    une page a été transcrite, l'endpoint expose un résultat partiel (les pages prêtes
+    jusqu'ici, triées par `page_number`) pour permettre au frontend d'afficher/vérifier
+    les premières pages pendant que les suivantes continuent d'être traitées en
+    arrière-plan. `status` reste la seule source de vérité pour savoir si le document
+    entier est terminé — ne pas déduire "terminé" de la simple présence de `result`.
+    """
 
     job_id: str
     status: JobStatus

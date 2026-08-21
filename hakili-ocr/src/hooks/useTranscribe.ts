@@ -6,12 +6,13 @@
  * `useTranscription` plus bas. Inclut aussi un mode mock (`USE_MOCK`) pour
  * développer l'UI sans backend ni clé API Anthropic.
  */
-import { useCallback, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import type {
   ApiResponse,
   TranscriptionResult,
   PDFTranscriptionResult,
+  PageResult,
   TranscriptionPayload,
   PdfJobStartResponse,
   PdfJobStatusResponse,
@@ -137,6 +138,28 @@ async function uploadPdfChunk(jobId: string, chunkBlob: Blob, isLastChunk: boole
   return fetchApi<PdfChunkAckResponse>(`/transcribe/pdf/${jobId}/chunk`, { method: 'POST', body: formData });
 }
 
+/**
+ * Retourne le préfixe contigu des pages prêtes en partant de la page 1, en s'arrêtant au
+ * premier "trou" — nécessaire tant que le job est encore `"processing"` : les pages sont
+ * traitées en parallèle (voir `ANTHROPIC_CONCURRENCY` côté backend) et terminent dans un
+ * ordre arbitraire, donc `pages` peut déjà contenir la page 5 sans encore avoir la page 3.
+ * Si l'on affichait ce tableau tel quel, l'index de tableau utilisé partout côté frontend
+ * (`ResultScreen`, `AppContext`) cesserait de correspondre à `page_number - 1`, et une page
+ * déjà affichée à un index donné pourrait "glisser" vers un autre contenu au poll suivant.
+ * Une fois le job terminé, un trou restant est définitif (page ayant échoué) — l'appelant
+ * n'utilise plus cette fonction dans ce cas, `jobStatus.result` est déjà la version finale.
+ */
+function takeReadyPagePrefix(pages: PageResult[]): PageResult[] {
+  const ready: PageResult[] = [];
+  let expected = 1;
+  for (const page of pages) {
+    if (page.page_number !== expected) break;
+    ready.push(page);
+    expected += 1;
+  }
+  return ready;
+}
+
 /** Progression réelle page par page d'un job PDF, telle qu'exposée par `UseTranscriptionResult.progress`. */
 export interface TranscriptionProgress {
   pagesDone: number;
@@ -178,6 +201,22 @@ export function useTranscription(): UseTranscriptionResult {
     enabled: pdfJobId !== null && !USE_MOCK,
     refetchInterval: (query) => (query.state.data?.status === 'processing' ? PDF_POLL_INTERVAL_MS : false),
   });
+
+  // Résultat réellement affichable à cet instant : tant que le job est encore
+  // "processing", on ne montre que le préfixe contigu de pages prêtes (voir
+  // `takeReadyPagePrefix`) plutôt que le tableau potentiellement troué renvoyé par le
+  // backend — une fois `status !== 'processing'`, plus aucun trou ne se comblera jamais
+  // (page en échec définitif), donc on renvoie le résultat final tel quel, sans filtrage.
+  const streamedResult = useMemo<PDFTranscriptionResult | null>(() => {
+    const jobStatus = statusQuery.data;
+    if (!jobStatus?.result) return null;
+    if (jobStatus.status !== 'processing') return jobStatus.result;
+    const readyPages = takeReadyPagePrefix(jobStatus.result.pages);
+    if (readyPages.length === 0) return null;
+    return readyPages.length === jobStatus.result.pages.length
+      ? jobStatus.result
+      : { ...jobStatus.result, pages: readyPages };
+  }, [statusQuery.data]);
 
   const [mockPdfResult, setMockPdfResult] = useState<PDFTranscriptionResult | null>(null);
 
@@ -292,7 +331,7 @@ export function useTranscription(): UseTranscriptionResult {
       isPending:
         startPdfMutation.isPending ||
         isChunkedStarting ||
-        (pdfJobId !== null && (!jobStatus || jobStatus.status === 'processing')),
+        (pdfJobId !== null && streamedResult === null && (!jobStatus || jobStatus.status === 'processing')),
       isError: startPdfMutation.isError || jobFailed || statusQuery.isError || chunkUploadError !== null,
       error:
         startPdfMutation.error ??
@@ -301,7 +340,7 @@ export function useTranscription(): UseTranscriptionResult {
           ? new TranscribeError(jobStatus?.error || 'Erreur inconnue lors du traitement du PDF.', 500, true)
           : statusQuery.error ?? null),
       progress: jobStatus ? { pagesDone: jobStatus.pages_done, pagesTotal: jobStatus.pages_total } : null,
-      data: jobStatus?.status === 'done' ? jobStatus.result ?? null : null,
+      data: streamedResult,
     };
   }
 

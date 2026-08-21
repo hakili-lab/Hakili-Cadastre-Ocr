@@ -21,6 +21,7 @@ const initialState: AppState = {
   selectedBlockId: null,
   pdfResult: null,
   currentPageIndex: 0,
+  pdfPagesTotal: null,
 };
 
 /** Distingue les deux formes de payload que `SET_RESULT` peut recevoir (image seule vs PDF multi-pages). */
@@ -47,6 +48,7 @@ function appReducer(state: AppState, action: AppAction): AppState {
         currentScreen: 'preview',
         pdfResult: null,
         currentPageIndex: 0,
+        pdfPagesTotal: null,
       };
 
     case 'CONFIRM_UPLOAD':
@@ -78,6 +80,7 @@ function appReducer(state: AppState, action: AppAction): AppState {
           currentScreen: 'result',
           selectedBlockId: null,
           currentPageIndex: 0,
+          pdfPagesTotal: action.pagesTotal ?? payload.pages.length,
         };
       }
       return {
@@ -87,6 +90,32 @@ function appReducer(state: AppState, action: AppAction): AppState {
         currentScreen: 'result',
         selectedBlockId: null,
         currentPageIndex: 0,
+        pdfPagesTotal: null,
+      };
+    }
+
+    // Ajoute les pages nouvellement prêtes à un `pdfResult` déjà affiché — dispatché à
+    // chaque poll une fois l'écran 'result' déjà atteint (voir App.tsx). `action.result.pages`
+    // est garanti par `useTranscribe.ts` (`takeReadyPagePrefix`) être une extension du
+    // préfixe déjà stocké (même contenu pour les pages déjà chargées, jamais réécrites une
+    // fois transcrites) — un simple remplacement du tableau est donc sûr, sans avoir besoin
+    // de fusionner élément par élément. `currentPageIndex`/`selectedBlockId` et les éditions
+    // déjà faites sur les pages en place ne sont jamais touchés.
+    case 'MERGE_PDF_RESULT': {
+      if (!state.pdfResult) return state;
+      const incomingPages = action.result.pages;
+      const pagesTotal = action.pagesTotal ?? state.pdfPagesTotal;
+      if (incomingPages.length <= state.pdfResult.pages.length) {
+        return pagesTotal === state.pdfPagesTotal ? state : { ...state, pdfPagesTotal: pagesTotal };
+      }
+      return {
+        ...state,
+        pdfResult: {
+          ...state.pdfResult,
+          pages: incomingPages,
+          final_warning: action.result.final_warning ?? state.pdfResult.final_warning,
+        },
+        pdfPagesTotal: pagesTotal,
       };
     }
 

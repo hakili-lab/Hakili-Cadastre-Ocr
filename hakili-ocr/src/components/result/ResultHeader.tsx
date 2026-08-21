@@ -6,7 +6,12 @@
 type ResultHeaderProps = {
   isPdf: boolean;
   currentPageIndex: number;
+  /** Pages effectivement chargées jusqu'ici — borne la navigation (bouton "suivant"). */
+  pagesLoaded: number;
+  /** Nombre total de pages du document — peut dépasser `pagesLoaded` tant que le PDF est encore en cours de traitement. */
   totalPages: number;
+  /** Le document a encore des pages en cours de traitement en arrière-plan. */
+  isStreaming: boolean;
   onPrevPage: () => void;
   onNextPage: () => void;
   onExportExcel: () => void;
@@ -19,7 +24,9 @@ type ResultHeaderProps = {
 export function ResultHeader({
   isPdf,
   currentPageIndex,
+  pagesLoaded,
   totalPages,
+  isStreaming,
   onPrevPage,
   onNextPage,
   onExportExcel,
@@ -53,7 +60,7 @@ export function ResultHeader({
           <button
             type="button"
             onClick={onNextPage}
-            disabled={currentPageIndex === totalPages - 1}
+            disabled={currentPageIndex === pagesLoaded - 1}
             className="flex items-center justify-center cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed bg-transparent border-0 p-1"
             aria-label="Page suivante"
           >
@@ -61,13 +68,23 @@ export function ResultHeader({
               <path d="M9 18l6-6-6-6" />
             </svg>
           </button>
+          {isStreaming && (
+            <span
+              className="flex items-center gap-1.5 pl-1 font-sans text-xs text-ink-muted"
+              title="Les pages restantes continuent d'être transcrites en arrière-plan"
+            >
+              <span className="h-1.5 w-1.5 rounded-full bg-action animate-pulse" />
+              Transcription en cours…
+            </span>
+          )}
         </span>
       )}
       {isPdf && <span className="w-px h-4 bg-line inline-block" />}
       <button
         type="button"
         onClick={onExportExcel}
-        disabled={isExportingExcel}
+        disabled={isExportingExcel || isStreaming}
+        title={isStreaming ? 'Attendez la fin de la transcription pour exporter le document complet' : undefined}
         className="h-10 px-4 rounded-sm border border-line-control bg-transparent font-sans font-medium text-base text-ink cursor-pointer inline-flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
       >
         {isExportingExcel && (
@@ -81,7 +98,8 @@ export function ResultHeader({
       <button
         type="button"
         onClick={onExportPdf}
-        disabled={isExportingPdf}
+        disabled={isExportingPdf || isStreaming}
+        title={isStreaming ? 'Attendez la fin de la transcription pour exporter le document complet' : undefined}
         className="h-10 px-4 rounded-sm border-0 bg-action text-surface font-sans font-medium text-base cursor-pointer inline-flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
       >
         {isExportingPdf && (

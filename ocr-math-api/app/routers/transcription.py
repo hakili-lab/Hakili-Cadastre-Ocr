@@ -175,15 +175,32 @@ async def _process_page_and_track(
         job.pages_done += 1
 
 
+def _build_pdf_result(
+    results: dict[int, PageResult], warnings: list[tuple[int, str]]
+) -> PDFTranscriptionResult:
+    """
+    Construit un `PDFTranscriptionResult` trié par numéro de page à partir des résultats
+    accumulés jusqu'ici. Utilisé aussi bien pour le résultat final (`_finalize_pdf_job`,
+    une fois toutes les pages traitées) que pour un résultat PARTIEL exposé par
+    `get_pdf_transcription_status` pendant que le job est encore `"processing"` — ce
+    qui permet au frontend d'afficher/vérifier les premières pages dès qu'elles sont
+    prêtes, sans attendre la fin du document entier.
+    """
+    pages = sorted(results.values(), key=lambda p: p.page_number)
+    ordered_warnings = [msg for _pn, msg in sorted(warnings, key=lambda item: item[0])]
+    return PDFTranscriptionResult(
+        pages=pages,
+        final_warning="\n".join(ordered_warnings) if ordered_warnings else None,
+    )
+
+
 def _finalize_pdf_job(job: PDFJob, results: dict[int, PageResult], warnings: list[tuple[int, str]],
                        errors: list[tuple[int, str]]) -> None:
     """
     Fabrique `job.result`/`job.status` à partir des résultats/avertissements/erreurs
-    accumulés, triés par numéro de page pour un ordre et un message déterministes
-    (jamais par ordre — arbitraire — de complétion des tâches). Partagé par
-    `_run_pdf_job` (fin du seul `gather`) et `_maybe_finalize_job` (fin du
-    dernier morceau d'un job chunké) pour que les deux flux produisent un
-    `PDFTranscriptionResult` strictement identique en forme.
+    accumulés. Partagé par `_run_pdf_job` (fin du seul `gather`) et
+    `_maybe_finalize_job` (fin du dernier morceau d'un job chunké) pour que les deux
+    flux produisent un `PDFTranscriptionResult` strictement identique en forme.
     """
     if not results:
         job.status = "error"
@@ -199,12 +216,7 @@ def _finalize_pdf_job(job: PDFJob, results: dict[int, PageResult], warnings: lis
         )
         return
 
-    pages = sorted(results.values(), key=lambda p: p.page_number)
-    ordered_warnings = [msg for _pn, msg in sorted(warnings, key=lambda item: item[0])]
-    job.result = PDFTranscriptionResult(
-        pages=pages,
-        final_warning="\n".join(ordered_warnings) if ordered_warnings else None,
-    )
+    job.result = _build_pdf_result(results, warnings)
     job.status = "done"
 
 
@@ -220,16 +232,16 @@ async def _run_pdf_job(job_id: str, page_images: list[tuple[bytes, int, int]]) -
     if job is None:
         return
 
-    results: dict[int, PageResult] = {}
-    warnings: list[tuple[int, str]] = []
-    errors: list[tuple[int, str]] = []
-
+    # Écrit directement dans les champs `job.results`/`job.warnings`/`job.errors`
+    # (plutôt que des dicts/listes locaux à cet appel) pour que
+    # `get_pdf_transcription_status` puisse exposer un résultat partiel — les pages
+    # déjà transcrites — pendant que `gather` attend encore les pages restantes.
     try:
         await asyncio.gather(*(
-            _process_page_and_track(idx + 1, img_bytes, job, results, warnings, errors)
+            _process_page_and_track(idx + 1, img_bytes, job, job.results, job.warnings, job.errors)
             for idx, (img_bytes, _orig_w, _orig_h) in enumerate(page_images)
         ))
-        _finalize_pdf_job(job, results, warnings, errors)
+        _finalize_pdf_job(job, job.results, job.warnings, job.errors)
     except Exception as exc:
         logger.exception("Échec inattendu du job PDF %s", job_id)
         job.status = "error"
@@ -346,12 +358,21 @@ async def get_pdf_transcription_status(job_id: str) -> PDFJobStatusResponse:
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job introuvable.")
 
+    # `job.result` n'est posé qu'à la finalisation (status "done"/"error"). Tant que le
+    # job est encore "processing", on construit un résultat PARTIEL à la volée à partir
+    # des pages déjà accumulées dans `job.results` — permet au frontend d'afficher/
+    # vérifier les premières pages sans attendre la fin du document entier. Coût
+    # négligeable : un simple tri du dict déjà en mémoire, à chaque appel de polling.
+    result = job.result
+    if result is None and job.status == "processing" and job.results:
+        result = _build_pdf_result(job.results, job.warnings)
+
     return PDFJobStatusResponse(
         job_id=job.job_id,
         status=job.status,
         pages_done=job.pages_done,
         pages_total=job.pages_total,
-        result=job.result,
+        result=result,
         error=job.error,
     )
 

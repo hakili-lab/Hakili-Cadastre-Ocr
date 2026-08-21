@@ -181,7 +181,7 @@ Styling is Tailwind v4 via `@tailwindcss/vite` (no `tailwind.config.js` — v4 u
 
 - ~~PDF pages are transcribed sequentially~~ **done (2026-08-20)** — `_run_pdf_job` now processes pages in parallel via `asyncio.gather`, bounded by the global `ANTHROPIC_CONCURRENCY` semaphore (see "PDF transcription" above). Anthropic prompt caching on the system prompt (identical across every page/call) is still a separate, not-yet-implemented speed/cost improvement.
 - No rich-text/raw-code toggle for editing complex-formula cells (see "Known limitation" above) — accepted as a permanent product decision, not planned work.
-- End-to-end manual verification of the corrections-collection flow (double-click → edit → confirm → modal → submit → verify the SQLite row and image file on disk) is still outstanding.
+- ~~End-to-end manual verification of the corrections-collection flow~~ **done** — `ocr-math-api/data/corrections.db` has 3 real rows (2026-08-11/12/14: a LaTeX formula fix, a plain-text field fix, a table-cell fix), each with a matching valid PNG under `data/images/` (15–532 KB, not empty/corrupt) and a manual `error_description` (e.g. "exemple de tetst amnuel pas d'erreur"/"test"/"testy") confirming intentional manual testing. Confirms the full double-click → edit → confirm → modal → submit → SQLite row + image-on-disk path works. Note: these predate the 2026-08-20 chunked-upload refactor and weren't re-run after it — the corrections flow itself wasn't touched by that refactor, but a fresh spot-check wouldn't hurt before relying on this for production sign-off.
 
 ## Production readiness — before opening to ~50-100 concurrent users
 

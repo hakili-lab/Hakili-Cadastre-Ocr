@@ -12,6 +12,7 @@
 import { useRef, useCallback, useEffect, useState } from 'react';
 import { useApp } from '../context/AppContext';
 import type { BoundingBox, TranscriptionBlock } from '../types';
+import type { TranscriptionProgress } from '../hooks/useTranscribe';
 import { EditingCellContext, CellDraftContext } from './result/editingCellContext';
 import { useBlockDrag } from '../hooks/useBlockDrag';
 import { useBlockEditing } from '../hooks/useBlockEditing';
@@ -25,9 +26,14 @@ import { CorrectionModal } from './result/CorrectionModal';
 import { exportTranscriptionToPdf } from '../utils/exportPdf';
 import { exportTranscriptionToExcel } from '../utils/exportExcel';
 
-export default function ResultScreen() {
+type ResultScreenProps = {
+  /** Progression réelle page par page du job PDF en arrière-plan — `null` pour une image simple ou une fois le hook démonté de tout job. */
+  progress?: TranscriptionProgress | null;
+};
+
+export default function ResultScreen({ progress = null }: ResultScreenProps) {
   const { state, dispatch } = useApp();
-  const { transcriptionResult, imagePreviewUrl, selectedBlockId, pdfResult, currentPageIndex, uploadedImage } = state;
+  const { transcriptionResult, imagePreviewUrl, selectedBlockId, pdfResult, currentPageIndex, pdfPagesTotal, uploadedImage } = state;
   const [isExportingPdf, setIsExportingPdf] = useState(false);
   const [isExportingExcel, setIsExportingExcel] = useState(false);
 
@@ -91,7 +97,13 @@ export default function ResultScreen() {
   if (!transcriptionResult) return null;
   const { final_warning } = transcriptionResult;
   const isPdf = pdfResult !== null;
-  const totalPages = pdfResult?.pages.length ?? 1;
+  // Pages effectivement chargées (bornes de navigation) vs nombre total de pages du
+  // document (affichage du header) — distincts tant que le PDF est encore en cours de
+  // traitement en arrière-plan : `pdfResult.pages` ne contient alors que le préfixe
+  // contigu des pages déjà prêtes (voir `useTranscribe.ts`, `takeReadyPagePrefix`).
+  const pagesLoaded = pdfResult?.pages.length ?? 1;
+  const totalPages = pdfResult ? (pdfPagesTotal ?? pagesLoaded) : 1;
+  const isStreaming = isPdf && progress !== null && progress.pagesDone < progress.pagesTotal;
   // 1 pour une image simple ; sinon le numéro de page tel que produit par PyMuPDF
   // côté backend (PageResult.page_number), pas juste currentPageIndex + 1 — les
   // deux coïncident en pratique mais celui-ci reste la source de vérité.
@@ -148,7 +160,9 @@ export default function ResultScreen() {
       <ResultHeader
         isPdf={isPdf}
         currentPageIndex={currentPageIndex}
+        pagesLoaded={pagesLoaded}
         totalPages={totalPages}
+        isStreaming={isStreaming}
         onPrevPage={handlePrevPage}
         onNextPage={handleNextPage}
         onExportExcel={handleExportExcel}

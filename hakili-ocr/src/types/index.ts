@@ -57,6 +57,13 @@ export interface AppState {
   /** Non-null uniquement quand le document chargé est un PDF multi-pages. */
   pdfResult: PDFTranscriptionResult | null;
   currentPageIndex: number;
+  /**
+   * Nombre total de pages du document PDF, connu dès le premier statut de job (voir
+   * `useTranscribe.ts`), indépendamment du nombre de pages déjà chargées dans
+   * `pdfResult.pages` (qui ne contient que le préfixe contigu des pages prêtes tant que
+   * le job est encore en cours — voir `MERGE_PDF_RESULT`). `null` pour une image simple.
+   */
+  pdfPagesTotal: number | null;
 }
 
 /**
@@ -69,7 +76,15 @@ export type AppAction =
   | { type: 'SET_IMAGE'; file: File; previewUrl: string }
   | { type: 'CONFIRM_UPLOAD'; file: File; previewUrl?: string }
   | { type: 'CANCEL_PREVIEW' }
-  | { type: 'SET_RESULT'; result: TranscriptionResult }
+  | { type: 'SET_RESULT'; result: TranscriptionResult; pagesTotal?: number | null }
+  /**
+   * Ajoute les pages nouvellement prêtes à un `pdfResult` déjà affiché (écran 'result'
+   * déjà atteint), sans toucher à `currentPageIndex`/`selectedBlockId` ni aux pages déjà
+   * chargées/éditées — voir `useTranscribe.ts` (`takeReadyPagePrefix`) pour la garantie
+   * que `result.pages` est toujours une extension du préfixe déjà stocké, jamais un
+   * remplacement de son contenu.
+   */
+  | { type: 'MERGE_PDF_RESULT'; result: PDFTranscriptionResult; pagesTotal?: number | null }
   | { type: 'SET_PAGE'; pageIndex: number }
   | { type: 'SELECT_BLOCK'; blockId: number | null }
   | { type: 'UPDATE_BLOCK_MARKDOWN'; blockId: number; markdown: string }
@@ -125,7 +140,13 @@ export interface PdfJobStatusResponse {
   status: PdfJobStatus;
   pages_done: number;
   pages_total: number;
-  /** Présent uniquement quand `status === 'done'`. */
+  /**
+   * Peut être présent AVANT que `status` passe à `'done'` : dès qu'au moins une page est
+   * transcrite, le backend expose un résultat partiel (les pages prêtes jusqu'ici,
+   * triées par `page_number`, potentiellement trouées si des pages sont encore en cours
+   * ou ont échoué). `status` reste la seule source de vérité pour savoir si le document
+   * entier est terminé.
+   */
   result?: PDFTranscriptionResult;
   /** Présent uniquement quand `status === 'error'`. */
   error?: string;

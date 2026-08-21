@@ -24,16 +24,31 @@ export default function App() {
   }, [state.uploadedImage, state.currentScreen, start]);
 
   // Fait suivre le résultat de useTranscription() dans AppContext dès qu'il arrive.
+  // Pour un PDF, `data` peut arriver en plusieurs vagues (pages ajoutées au fil du
+  // traitement en arrière-plan, voir useTranscribe.ts) : la toute première vague bascule
+  // l'écran vers 'result' (SET_RESULT), les suivantes ajoutent les nouvelles pages sans
+  // perturber la page actuellement affichée ni les éditions déjà faites (MERGE_PDF_RESULT).
   useEffect(() => {
-    if (data) {
-      // Un payload PDF ('pages' dans data) n'a pas de champ `blocks` propre — on le
-      // normalise pour que le type reste cohérent avant de le passer au reducer.
-      const normalizedResult = {
-        ...data,
-        blocks: 'blocks' in data ? data.blocks : [],
-      };
-      dispatch({ type: 'SET_RESULT', result: normalizedResult });
+    if (!data) return;
+    if ('blocks' in data) {
+      // Image simple : payload complet en un seul morceau, pas de flux à gérer.
+      dispatch({ type: 'SET_RESULT', result: data });
+      return;
     }
+    const pagesTotal = progress?.pagesTotal ?? null;
+    if (state.pdfResult) {
+      dispatch({ type: 'MERGE_PDF_RESULT', result: data, pagesTotal });
+    } else {
+      // Normalise pour que le type reste cohérent avec SET_RESULT (voir sa définition) —
+      // un payload PDF n'a pas de champ `blocks` propre. Passé via une variable (pas un
+      // littéral inline) pour éviter l'excess-property-check de TS sur `pages`.
+      const normalizedResult = { ...data, blocks: [] };
+      dispatch({ type: 'SET_RESULT', result: normalizedResult, pagesTotal });
+    }
+    // state.pdfResult est lu volontairement sans figurer ici : on veut réagir uniquement
+    // aux nouvelles arrivées de `data`, pas aux mises à jour de pdfResult qu'on vient
+    // nous-mêmes de déclencher (qui refléteraient sinon un état d'un cran en retard).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data, dispatch]);
 
   // Bascule sur l'écran de chargement dès qu'une requête part, même si CONFIRM_UPLOAD
@@ -89,7 +104,7 @@ export default function App() {
           </div>
         )}
         {state.currentScreen === 'result' && state.transcriptionResult && (
-          <ResultScreen />
+          <ResultScreen progress={progress} />
         )}
       </main>
     </div>

@@ -34,8 +34,8 @@ cp .env.example .env    # puis renseigner ANTHROPIC_API_KEY, APP_API_KEY, etc.
 docker compose up -d --build
 ```
 
-- Frontend : `http://localhost:8080`
-- Backend : `http://localhost:8000` (docs Swagger : `http://localhost:8000/docs`)
+- Frontend : `http://localhost:8021`
+- Backend : `http://localhost:8020` (docs Swagger : `http://localhost:8020/docs`)
 
 Après une modification de code :
 
